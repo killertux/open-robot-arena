@@ -49,11 +49,13 @@ import datetime
 import json
 import math
 import os
+import re
 import shutil
 import statistics
 import subprocess
 import sys
 import tempfile
+import threading
 
 from PIL import Image, ImageChops, ImageDraw, ImageStat
 
@@ -98,6 +100,16 @@ def scratch_install(src):
             shutil.copy2(s, d)
         else:
             os.symlink(s, d)
+    # The references were captured with the original running at 1024x768 (its window shows that mode
+    # as the current resolution in Options); local/game's ra2.cfg says 1280x1024, which only the
+    # scratch copy is changed from (docs/36 9.41).
+    cfg = os.path.join(dst, "ra2.cfg")
+    if os.path.isfile(cfg):
+        text = open(cfg, newline="").read()
+        for key, val in (("FSDisplayWidth", 1024), ("FSDisplayHeight", 768),
+                         ("FS3DDisplayWidth", 1024), ("FS3DDisplayHeight", 768)):
+            text = re.sub(r"(?m)^%s=.*?(\r?)$" % key, lambda m, k=key, v=val: "%s=%d%s" % (k, v, m.group(1)), text)
+        open(cfg, "w", newline="").write(text)
     return dst
 
 BIN = os.environ.get("RA2_BIN") or os.path.join(ROOT, "engine", "target", "release")
@@ -280,6 +292,12 @@ LIVE_FILE = {"intro2": "cam-intro.png", "countdown2": "cam-cd.png", "f4live": "c
 # flight to the six best-fitting state-hooked stills (fit residual +-0.01 s):
 #     camera T = intro clock - first_frame_dt - INTRO_CAMERA_LAG        (docs/34 section 9)
 INTRO_CAMERA_LAG = 0.265
+# Per-arena residual of that law, fitted with exact-T stills (docs/36 9.41: the app cuts the step
+# that crosses T; a sweep of T in 5-10 ms steps against each intro2 reference, the minimum of the
+# MAE).  The law alone leaves 0..0.04 s per arena, which at the flight's speed is up to 8 MAE.
+# Not explained by the first frame's dt (0.19..1.28 s); it is a measured calibration, +-0.005 s.
+INTRO_FIT_DELTA = {"bridge": 0.040, "box": 0.025, "compressor": 0.004, "electric": 0.010,
+                   "halfcircle": 0.040, "metalskull": 0.040, "octagon": 0.012, "parkinglot": 0.012}
 
 
 def live_states():
@@ -362,20 +380,24 @@ def run_live_shots(arena, tmp):
         return None
     d = os.path.join(tmp, "live-" + arena)
     os.makedirs(d, exist_ok=True)
-    t_intro = statistics.mean(st["intro_clock"]) - st["first_frame_dt"] - INTRO_CAMERA_LAG
-    shots = ["intro@%.3f" % t_intro,
-             "cd@%.3f" % statistics.mean(st["countdown_left"])]
+    t_intro = (statistics.mean(st["intro_clock"]) - st["first_frame_dt"] - INTRO_CAMERA_LAG
+               + INTRO_FIT_DELTA.get(arena, 0.0))
+    rest = ["cd@%.3f" % statistics.mean(st["countdown_left"])]
     if os.path.exists(os.path.join(ORIG, "arena-%s-f4live__1024x768__000.png" % arena)):
-        shots.append("f4@2.5")
+        rest.append("f4@2.5")
     bots = ",".join(os.path.join(GAME, "AI", "Team0", b) for b in ("Bot0.bot", "Bot1.bot"))
-    p = subprocess.run([APP, "--game", GAME, "--match", "--seconds", "40", "--out", d,
-                        "--size", "%dx%d" % SIZE, "--bots", bots, "--arena", os.path.join(GAME, "Arenas", ARENA_SCRIPTS[arena]),
-                        "--camera-shots", ",".join(shots)]
-                       + (["--earlier-arenas", ",".join(earlier_arenas(arena))] if earlier_arenas(arena) else []),
-                       capture_output=True, text=True, env=env(), timeout=900)
-    if p.returncode:
-        sys.stderr.write(p.stderr[-400:])
-    return d if p.returncode == 0 else None
+    # Two runs: a lone `intro@T` still is taken at exactly T (the app cuts the step that crosses
+    # T), while a run with later shots keeps whole fixed steps (docs/36 9.41).
+    for shots in (["intro@%.3f" % t_intro], rest):
+        p = subprocess.run([APP, "--game", GAME, "--match", "--seconds", "40", "--out", d,
+                            "--size", "%dx%d" % SIZE, "--bots", bots, "--arena", os.path.join(GAME, "Arenas", ARENA_SCRIPTS[arena]),
+                            "--camera-shots", ",".join(shots)]
+                           + (["--earlier-arenas", ",".join(earlier_arenas(arena))] if earlier_arenas(arena) else []),
+                           capture_output=True, text=True, env=env(), timeout=900)
+        if p.returncode:
+            sys.stderr.write(p.stderr[-400:])
+            return None
+    return d
 
 
 # --------------------------------------------------------------------------
@@ -468,6 +490,7 @@ def run_match_frames(tmp):
 
 
 _FRAMES = {}
+_FRAMES_LOCK = threading.Lock()  # --jobs N runs fixtures on threads: the cache and its dir names race
 
 
 def hq_frame(fx, tmp):
@@ -475,28 +498,30 @@ def hq_frame(fx, tmp):
     row, name = fx["hqsim"][:2]
     extra = list(fx["hqsim"][2]) if len(fx["hqsim"]) > 2 else []
     key = ("hq", row, tuple(extra))
-    if key not in _FRAMES:
-        d = os.path.join(tmp, "hq%d_%d" % (row, len(_FRAMES)))
-        os.makedirs(d, exist_ok=True)
-        p = subprocess.run([APP, "--game", GAME, "--hq", "--simulate-event", str(row), "--out", d,
-                            "--bench-undamaged", "--size", "%dx%d" % SIZE] + extra,
-                           capture_output=True, text=True, env=env(), timeout=900)
-        _FRAMES[key] = d if p.returncode == 0 else None
-    d = _FRAMES[key]
+    with _FRAMES_LOCK:
+        if key not in _FRAMES:
+            d = os.path.join(tmp, "hq%d_%d" % (row, len(_FRAMES)))
+            os.makedirs(d, exist_ok=True)
+            p = subprocess.run([APP, "--game", GAME, "--hq", "--simulate-event", str(row), "--out", d,
+                                "--bench-undamaged", "--size", "%dx%d" % SIZE] + extra,
+                               capture_output=True, text=True, env=env(), timeout=900)
+            _FRAMES[key] = d if p.returncode == 0 else None
+        d = _FRAMES[key]
     return os.path.join(d, name) if d else None
 
 
 def quit_frame(fx, tmp):
     """`ra2-app --match --quit-at 18` (cached): reminder.png and pause.png over a Scout v ALARM fight."""
-    if "quit" not in _FRAMES:
-        d = os.path.join(tmp, "quit")
-        os.makedirs(d, exist_ok=True)
-        bots = ",".join(os.path.join(GAME, "AI", "Team0", b) for b in ("Bot1.bot", "Bot0.bot"))
-        p = subprocess.run([APP, "--game", GAME, "--match", "--seconds", "30", "--quit-at", "18", "--out", d,
-                            "--size", "%dx%d" % SIZE, "--bots", bots],
-                           capture_output=True, text=True, env=env(), timeout=900)
-        _FRAMES["quit"] = d if p.returncode == 0 else None
-    d = _FRAMES["quit"]
+    with _FRAMES_LOCK:
+        if "quit" not in _FRAMES:
+            d = os.path.join(tmp, "quit")
+            os.makedirs(d, exist_ok=True)
+            bots = ",".join(os.path.join(GAME, "AI", "Team0", b) for b in ("Bot1.bot", "Bot0.bot"))
+            p = subprocess.run([APP, "--game", GAME, "--match", "--seconds", "30", "--quit-at", "18", "--out", d,
+                                "--size", "%dx%d" % SIZE, "--bots", bots],
+                               capture_output=True, text=True, env=env(), timeout=900)
+            _FRAMES["quit"] = d if p.returncode == 0 else None
+        d = _FRAMES["quit"]
     return os.path.join(d, fx["matchquit"]) if d else None
 
 

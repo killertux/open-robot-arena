@@ -724,7 +724,9 @@ impl Shell {
             .collect();
         // byte order: live the third of the six XTRA designs was `XTRA_BarberShop Chop`, after `XTRA_BOT-CHOY`
         self.import_designs.sort();
-        self.open_window("botlab/importbot.gib")
+        self.open_window("botlab/importbot.gib")?;
+        self.refresh_import_preview();
+        Ok(())
     }
 
     pub fn set_team_hook(&mut self, hook: TeamHook) {
@@ -2172,7 +2174,9 @@ impl Shell {
             }
             _ => None,
         });
-        let Some(name) = row.and_then(|r| self.import_designs.get(r)) else {
+        // Live (`teamhq-import-dialog`): the window opens with no row highlighted but the first
+        // design's snapshot already in the preview.
+        let Some(name) = self.import_designs.get(row.unwrap_or(0)) else {
             return;
         };
         let path = ra2fmt::saves::resolve(&self.game, format!("Robot Designs/{name}"));
