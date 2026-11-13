@@ -1158,7 +1158,9 @@ Four kinds do not place their children from the children's own `Position`:
 - `tools/vendor/PyRA2/` — reference parsers for GMI/GMF + `.bot` (LGPL, Python 2).
 - Game's own `#Tools/` — GMF Compiler (text↔binary GMF + 3ds Max exporter),
   BOT Editor (TGA extract/import), CFZ Compiler, MakeCFL/UnCFL, Component Exporter.
-- `tools/extract_sfx.py` — stream-zip extractor (superseded by Wine install).
+- `tools/extract_sfx.py` — stream-zip extractor; it only finds the ~200 zip headers that sit inside
+  the payload. Superseded by `tools/extract-install.sh` (`extract_install.py`), which reads the
+  Advanced Installer footer, the MSI tables and the MSZIP cabinet: all 1770 files, equal to a Wine install.
 
 ## 6b. Full script API inventory (from shipped `.py`)
 

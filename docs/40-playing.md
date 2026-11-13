@@ -17,6 +17,13 @@ your install.
   and `Music/`: copy the whole install. The `.exe` itself is never run and
   nothing in the folder is changed. The game is not included and not
   downloaded by the port.
+* No Windows or Wine needed to get that folder from the "LGU Repack"
+  download (`ra2_repack.zip`, an Advanced Installer exe that already carries
+  1.20): `tools/extract-install.sh ra2_repack.zip "<game folder>"` unpacks it
+  with python3 alone, on macOS too. Its 1770 files were checked byte for byte
+  against the same installer run under Wine. Other installers (a retail CD's
+  InstallShield `data1.cab`) are not handled; install those under Wine or on
+  Windows and copy the folder.
 * CPython 3.12 with its shared library (`python3.12 libpython3.12` on
   Debian/Ubuntu); a Vulkan driver (Mesa's software one works) and a display.
 * To build from source: a Rust toolchain (stable), a C compiler, `python3.12-dev`,
