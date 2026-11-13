@@ -178,14 +178,17 @@ impl Gpu {
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("ra2-app"),
             required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::downlevel_defaults(),
+            // The downlevel set caps textures at 2048, below a Retina window's pixels
+            // (2940x1846 on a MacBook Air): take the adapter's own texture size.
+            required_limits: wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
             experimental_features: wgpu::ExperimentalFeatures::disabled(),
             memory_hints: wgpu::MemoryHints::Performance,
             trace: wgpu::Trace::Off,
         }))
         .map_err(|e| format!("cannot open the GPU device: {e}"))?;
 
-        let size = window_size(&window);
+        let max_side = device.limits().max_texture_dimension_2d;
+        let size = fit_surface(window_size(&window), max_side);
         let mut config = surface
             .get_default_config(&adapter, size[0], size[1])
             .ok_or_else(|| "the window has no usable surface format".to_string())?;
@@ -225,6 +228,7 @@ impl Gpu {
         if size[0] == 0 || size[1] == 0 {
             return;
         }
+        let size = fit_surface(size, self.device.limits().max_texture_dimension_2d);
         self.config.width = size[0];
         self.config.height = size[1];
         self.surface.configure(&self.device, &self.config);
@@ -236,6 +240,18 @@ impl Gpu {
     fn configure(&mut self) {
         self.surface.configure(&self.device, &self.config);
     }
+}
+
+/// Scale a window's pixel size down, keeping its shape, until neither side exceeds
+/// the device's largest texture; the system stretches the smaller surface over the
+/// window.
+fn fit_surface(size: [u32; 2], max_side: u32) -> [u32; 2] {
+    let longest = size[0].max(size[1]);
+    if longest <= max_side {
+        return size;
+    }
+    let scale = |side: u32| ((side as u64 * max_side as u64) / longest as u64).max(1) as u32;
+    [scale(size[0]), scale(size[1])]
 }
 
 fn depth_target(device: &wgpu::Device, size: [u32; 2]) -> (wgpu::Texture, wgpu::TextureView) {
@@ -1838,5 +1854,17 @@ fn is_drive_key(key: &PhysicalKey) -> bool {
 fn apply_drive_key(key: &PhysicalKey, pressed: bool, input: &mut DriveInput) {
     if let Some(code) = dik_of(key) {
         input.keys.set(code, pressed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fit_surface;
+
+    #[test]
+    fn a_window_larger_than_the_texture_limit_is_scaled_down_in_shape() {
+        assert_eq!(fit_surface([2940, 1846], 16384), [2940, 1846]);
+        assert_eq!(fit_surface([2940, 1846], 2048), [2048, 1285]);
+        assert_eq!(fit_surface([1846, 2940], 2048), [1285, 2048]);
     }
 }
