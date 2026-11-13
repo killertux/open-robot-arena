@@ -8648,3 +8648,38 @@ Captures (display `:9`, port `27149`, under the shared lock, `Teams/ AI/ ra2.cfg
 **Open.** (a) The Scout's tail time in the Box (about 2 times live's in the numbers, long-run counts not significant): about a hundred live fights would settle it. (b) The live left wheel in the air does not hold 17 rad/s: its speed about the chassis' x
 wobbles by 3.8 rad/s at about 4 Hz (a smooth sinusoid, `tipab-scout-tail-drive-box__live__000`; the right wheel holds 17.1; the principal axes of both are within 1 degree of the axle) where ours holds it to 0.1 (the chassis' angular velocity jitters by 0.1 rad/s in both); cause not found, not seen to matter. (c) Items (b)-(f) of 12bf
 (ALARM's hammer on the placed Scout, the Sentinel's push, the Wide Load's Mini wheels, the front wheels' lost spin after a lift, the Box ALARM count and the Razor FlapJack count) stand.
+
+### 12bh. The Box ALARM count is the match length: per second of fight ours hits as live does and ours' fights end sooner on the Scout's tail stand; the live Box reference is now 28 bell-primed fights (fx/boxhits; measurements and a tool, no engine change)
+
+**1. Do the live references cut at the end of the match? Yes, already.** `live_ref.py` counts the bell-primed fights over match clock 0-120 s "to the end" (the first robot out, from the `O` row);
+the "no end cut" rows beside it differ by at most 0.1 hits (Box 46.6 / 46.7, Razor FlapJack 0.6 / 0.6), so the end cut changes nothing. (The 12bg tail-stat Box captures cannot extend the reference:
+their `H` rows are another record, no priced hits, and `parts_live.analyse` has no clock for them.)
+
+**2. More live fights.** 10 more bell-primed Box fights (`partsfight-scout-alarm-box__live__012..021`, `capture_parts_set.sh 12` on display `:9`, port `27149`, under the shared lock; each capture's robots checked by chassis hitpoints 1828 / 2662 after the other agent restored the prefix's
+files during the run; the 11th run timed out on the frida attach after that and the script was stopped, the Razor half never ran). Prefix: `Teams/ AI/ ra2.cfg` sha256 equal to the pre-session list ("prefix restored"), `Custom Textures/` equal to its list, no `Robot Designs/`; manifest rows,
+backup copies, `manifest-additions-2026-11-13-boxhits.tsv`. Box live (bell, 0-120 s to the end), n 18 -> **28**: Scout 7.1 -> **6.6 +- 0.6**, ALARM 46.6 -> **42.5 +- 4.2**, damage 407 / 2131 -> 400 / 1971 hp, length 89.5 -> **91.9 +- 5.5 s**.
+Ours (96 warmups, 120 s, `RA2_AI_TRACE=1 FIDTRACE_UP=1`, scratch install, master d0ee085 reproduces 12bf to the digit): **7.4 +- 0.5 / 36.9 +- 2.4**, 360 / 1797 hp, length 75.3 +- 2.6 s. The ALARM count is -1.2 se (was -2.0 against the 18); the length is -2.7 se.
+Razor / FlapJack: ours 6.3 +- 0.4 / 1.2 +- 0.1 (288 / 111 hp, 57.7 s), live (15) 6.0 / 0.6 (236 / 93, 48.5 s): unchanged.
+
+**3. The match-length test (`tools/oracle/length_window_cmp.py`).** Hits of ALARM on the Scout (>= 10 hp) in the first T s of the fights that last at least T s, live against ours:
+
+| T | live n, mean | ours n, mean |
+|---|---|---|
+| 20 s | 28, 10.1 +- 1.6 | 96, 10.1 +- 0.7 |
+| 40 s | 27, 18.0 +- 2.5 | 86, 18.5 +- 1.3 |
+| 60 s | 24, 23.5 +- 2.8 | 70, 26.6 +- 1.9 |
+| 90 s | 13, 38.2 +- 5.2 | 30, 42.1 +- 3.8 |
+
+**Hammer, contact and counting rule agree per second of fight** (0.49 hits/s in ours, 0.52 live); the ALARM deficit comes from fights that end early: 27 % of ours' fights are over before 60 s against 14 % live (10 % against 4 % before 40 s), 87 of 96 by `LastRobot`
+(the Scout out; 81 won by ALARM). In ours' fights under 60 s the Scout is on its tail (|up.y| < 0.3) for 36 % of the last 18 s (ALARM 27 %, both 23 %; 6 of the 26 are an A-frame), in the 60-100 s ones 12 % and in those of 100 s or more 0 %: **it is the Scout's tail stand of
+12bd-12bg, not a hammer or damage rule.** Nothing to fix in the counting.
+
+**4. The Razor's FlapJack.** The 120 FlapJack hits of 10 hp or more in ours' 96 fights: 75 are the opening wedge hit at 3.4-3.7 s (0.63 a fight; live 7 of 15 at 3.4-3.7 s, 0.47, 1 se), the other 45 are FlapJack's chassis ramming the Razor at 6-7 m/s (11-12 hp) through the fight, 0.012 a second;
+live has 2 in about 670 s of fight (0.003 a second; ours' rate would give 8, P about 0.01). Live fights are shorter (60 % under 40 s against 39 %). The cause (a different path of the FlapJack's drive after the Razor is damaged, or the Razor's end) was not found.
+
+**5. The lifted front wheel (task 2), located not fixed.** In a probe (ALARM 3 m up, still, one wheel set to 5 rad/s about its axle, idle drive) the two wheels at the front of the chassis (z = +0.48) fall to 0.66 / 0.79 rad/s in the first step, then decay as the rear pair's 4.97 -> 4.77 (z = -0.6 keep it). Their `JointInfo`s are identical (motor 1/3 and 5/7, limits +-pi, no friction, rate 18, torque 560), none is a steering hub
+(`steer` is `None`), the motor is off (percent 0), and the angular velocity does not go into the chassis (it moves 0.09 rad/s): the spin is taken by something that treats the front wheels differently, not by the hinge's configuration. Not followed further (the 12bf test keeps the rear wheel). The live in-air wheel's 4 Hz swing of +-3.8 rad/s was not looked at.
+
+**6. Sentinel push (task 3):** not worked on. **Tools:** `length_window_cmp.py`. No engine change, so no switch and no new engine test; the Compressor and Octagon ensembles were not re-run (12bf's 83.5 / 18.0 stand).
+
+**Open.** The Scout's tail persistence (it ends 27 % against 14 % of the fights before 60 s); the FlapJack's late chassis hits; the front wheels' lost spin; the in-air swing; the Sentinel's push; the Razor live fights (15) for the 0.6.
