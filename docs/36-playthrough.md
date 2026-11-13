@@ -2090,21 +2090,40 @@ Not looked at beyond reading: it needs the live draw path (blend state of `repai
 * Which of the damaged components the original really has hitpoints off (4 of 8), by logging `FUN_004df6e0` live.
 * The bench's `Options` and `Help` buttons, the left/right shadow edge's +8/+9/+12 residual.
 
-## 9.39 plus.damage's component index (`fx/benchlive`, 2026-11-06)
+## 9.39 Why 4 rows from 8 damaged components, the bench's Options and Help, the shadow edge (`fx/benchlive`, 2026-11-06 / 11-13)
 
-**No live session was run**: taking the shared live lock (`flock ~/.cache/ra2-live.lock` held by a background shell for the session) was refused by the permission system, so tasks 2 (Options / Help on the bench) and 3 (the
-shadow's blue residual) and the live `FUN_004df6e0` log of task 1 are not done; no capture was added and no code changed. The prefix's `Teams/ AI/ ra2.cfg` were copied to the scratchpad beforehand (nothing was started).
+Live (flatpak Wine on :7, Frida through `ra2_hook.py` / `ra2_python.py` / `ra2_drive.py`; the prefix's `Teams/`, `AI/`, `Custom Textures/`, `ra2.cfg` copied before, restored after, sha256 list equal; the first session
+was cut off by an expired login and the prefix, re-saved by another session, was restored once more) plus Ghidra. New captures (`local/oracle/original`, manifest rows, backup copy and
+`manifest-additions-2026-11-06-benchlive.tsv`): `event-repairs-help`, `event-repairs-options`, `event-repairs-triples` (json).
 
-Binary finding (Ghidra, `Robot Arena 2.exe`) that bears on the "4 rows from 8 damaged components" of 9.37 / 9.38:
+### 1. The 4 rows were real: only 4 components lose hitpoints
 
-* `plus.damage(player, comp, amount, point)` is `FUN_004cd320` -> `FUN_004148f0`, which resolves `comp` with `FUN_004dd780(param_2)`: a lookup of `comp` in a **global map** (`DAT_00716108`, `FUN_00600bf0` / `FUN_004e2290`),
-  returning the component object or 0 (then nothing is damaged; `if (iVar1 != 0)`). `param_1` is checked separately with `FUN_00414780` (the player).
-* The key space is therefore the component **id** (`[c+0x22c]`, the factory counter `[factory+0x7c]`, 9.38), not an index into one robot's design order. Ids are unique across every robot built (both robots of the match, and
-  possibly components built earlier, such as the bench/preview robots), so `plus.damage(0, 1..8, ...)` hits the components that happen to own ids 1-8, which need not be eight components of Atom Smasher; ids that
-  belong to the AI robot, or to no live component, damage the other robot or nothing. This is the likely reason for 4 rows. Not verified: it needs the id of each of Atom Smasher's components (hook `FUN_004dc2d0` or
-  `FUN_004df6e0` live) and whether the id counter is reset per match.
-* For ours: a test or a report with "components 1-8" must map through the original's id assignment (order in which `FUN_004dbf40` creates components: robot 0 first?) before it is compared; the row rule
-  `trunc(hp) < max` (9.38) stays.
+* `FUN_004df6e0` hooked live (`(id, trunc(hp), max)` per component): Atom Smasher has **17** components, id = design index (0 chassis 534, 1-7 400, 8-9 1000, 10-11 400, 12-13 100, 14 400, 15-16 1000), logged at the match
+  start and at the round end. After `plus.damage(0, c, 35.0, point)` for c = 1..8 (amount a float: an int is accepted but the first attempts were lost to a Python call that never ran) only **ids 4-7** read 365/400; 1-3, 8, 9 are
+  unchanged. So the bench's filter (`trunc(hp) < max`, 9.38) made exactly 4 rows (`event-repairs-damaged`, 4 rows; the same on BBA Midwest round 1 and Blackvolt round 1).
+* Probe `plus.damage(0, c, 1 + c)` for c = 0..39: the losses were exactly `1 + c` at indices 0, 4-7, 10-15 and **zero at 1, 2, 3, 8, 9**; other indices do not exist. The lookup (`FUN_004dd780`, a map keyed by the component
+  id = design index) does resolve 1-3, 8, 9; they just keep their hitpoints (the mount-depth rule `Robot::damage` already has: a part bolted straight to the chassis that is not damageable loses nothing).
+* **Ours already does it.** New test `plus_damage_on_components_one_to_eight_of_atom_smasher_costs_four_components_hitpoints` (`match_mode.rs`): the same two patterns on Atom Smasher give hits at {4,5,6,7} and
+  {0,4-7,10-15} with the live amounts. No model change. (Ours has 18 parts, the live robot 17, and ours' chassis hitpoints sum to 1604 against the live 534; the order from index 14 on also differs, which the bench's row
+  count does not see; open.) Gotchas for the next live round: the human robot is reaped by the immobility rule after about 20 s, an AI that is not neutered kills it, and a round lost ends the event: neuter the AI
+  (`AI.running_ai[..].Think = nop`) and call `plus.eliminatePlayer(p)` for every other player in the same script, after a trivial `ra2_python -c` probe (the first Python call after a match start sometimes never runs).
+* Second pattern: BBA Midwest round 2 and Sawblade round 1 were lost to the immobility rule before the script ran, so the second pattern is the bench-less probe above; a 4-player Blackvolt bench gave 4 rows again.
+
+### 2. The bench's Options and Help (live + ours)
+
+Live (`event-repairs-help`, `event-repairs-options`): **Help** opens the modal Help window over the bench with the `help_repairs.gib` text ("Repairs / Congratulations! You must have won the last round ...", a Close button);
+**Options** opens the shell's Options window (Video / Audio, OK / Cancel). The bench stays under them. Ours: `Window::bench_bar_click` takes the clicks on the bar while the bench is up (Help -> `Shell::open_modal(help_target(3))`,
+Options -> the options window), sends every click to the shell's window handling while one is open, and draws `windows_scene` over the bench. Test assertions in `playthrough.rs` (the bar's three controls, the help
+modal opens and closes with the bench's base screen unchanged).
+
+### 3. The shadow edge residual
+
+`ra2_d3dstate`-style hook on all four Draw* entries of the live bench (`DrawPrimitive`, `DrawIndexedPrimitive` and the UP forms): **every UI draw has the same state**: alpha blend on, `SRCALPHA / INVSRCALPHA`,
+stage 0 `MODULATE` of texture and diffuse for colour and alpha, texture factor white. So the bench's shadow is an ordinary alpha blend of the black texture (`repairbench_shadows.tga`: rgb 0 in every texel, alpha 66 at the
+edge falling to 0 by x = 20), not a different blend state. The residual is therefore not the blend: per column, live = ours x 0.90 + (12, 17, 19) over x = 52..54 (and 970..972 on the right, weaker in red), i.e. a
+10 % mix with a light bluish grey (about (150, 165, 170)) in the first three pixels of the frame, left and right. A second quad or the frame image's own edge is the likely source; which texture it is was not
+identified (the hook sees texture pointers, not names), so no change was made (`event-repairs` 1.06, `event-repairs-atom` 1.25, unchanged).
 
 ### Open
-* Everything in the task list that needs the live game: the `FUN_004df6e0` triples, a second damage pattern, the bench's Options / Help, the shadow edge blend state.
+* The identity of the draw that adds the 10 % bluish mix at the left / right frame edge (needs the texture name per pointer, e.g. a hook on the texture loader).
+* Ours has 18 parts for Atom Smasher where the live robot has 17, and a different order after index 13.

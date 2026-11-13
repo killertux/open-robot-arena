@@ -2821,6 +2821,59 @@ mod tests {
         );
     }
 
+    /// Live (docs/36 9.39, `event-repairs-triples`): `plus.damage(0, c, 35, point)` for c = 1..8 on
+    /// Atom Smasher took hitpoints off only the components 4-7 (`FUN_004df6e0` logged 365 / 400 for
+    /// ids 4-7 and full hitpoints for 1-3 and 8, 9), so the bench made four rows. Components 1-3
+    /// (the casters and the angle motor mounted straight on the chassis) and 8, 9 absorb the
+    /// request without losing hitpoints.
+    #[test]
+    fn plus_damage_on_components_one_to_eight_of_atom_smasher_costs_four_components_hitpoints() {
+        let Some(game) = game_dir() else { return };
+        let _guard = ra2script::lock();
+        let atom = game.join("Robot Designs/XTRA_Atom Smasher.bot");
+        if !atom.is_file() {
+            return;
+        }
+        let bots = vec![atom, game.join(BOTS[1])];
+        let options = Options::new(&game, None, bots, Some(30.0), None, None, [640, 502]).unwrap();
+        let mut session = Session::new_player(&options).expect("the match");
+        let duel = &mut session.matched.duel;
+        let point = duel.robots[0].position(&*duel.physics);
+        let before = duel.robots[0].health.clone();
+        for c in 1..=8usize {
+            duel.apply_hit_with(0.0, None, 0, c, 35.0, point);
+        }
+        let after = duel.robots[0].health.clone();
+        let hit: Vec<usize> = (0..before.len())
+            .filter(|&i| (before[i] - after[i]).abs() > 1e-3)
+            .collect();
+        eprintln!(
+            "components {} lost hp at {:?}; before {:?}",
+            before.len(),
+            hit,
+            before
+        );
+        assert_eq!(hit, vec![4, 5, 6, 7]);
+
+        // The second pattern, `plus.damage(0, c, 1 + c, point)` for c = 0..=15 (live, on a robot that had
+        // taken the first: the losses were exactly 1 + c at 0, 4-7 and 10-15, nothing at 1-3, 8, 9).
+        let duel = &mut session.matched.duel;
+        let before = duel.robots[0].health.clone();
+        for c in 0..=15usize {
+            duel.apply_hit_with(0.0, None, 0, c, 1.0 + c as f32, point);
+        }
+        let lost: Vec<(usize, f32)> = (0..16)
+            .filter(|&i| (before[i] - duel.robots[0].health[i]).abs() > 1e-3)
+            .map(|i| (i, before[i] - duel.robots[0].health[i]))
+            .collect();
+        eprintln!("second pattern lost {lost:?}");
+        let live: Vec<(usize, f32)> = [0, 4, 5, 6, 7, 10, 11, 12, 13, 14, 15]
+            .iter()
+            .map(|&i| (i, 1.0 + i as f32))
+            .collect();
+        assert_eq!(lost, live);
+    }
+
     /// The floating damage number (docs/37 section 7) reaches the HUD scene as two `fg_d20` cells in
     /// the damage colour, behind the HUD windows, 0.15 s after a hazard hit on the human robot,
     /// and is gone a second after that; the options window's `GraphicMessages` switch turns it off.

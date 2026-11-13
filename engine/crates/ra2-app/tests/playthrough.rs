@@ -253,6 +253,37 @@ fn an_event_entered_in_the_shell_is_played_by_the_player_and_saved() {
         Some("MainMenu button")
     );
     assert_eq!(flow::nav_control_at(&shell, [640.0, 400.0]), None);
+    // Options and Help are the bar's too (live `event-repairs-options`, `event-repairs-help`): the
+    // bench opens the Repairs help (help id 3) and the options window as shell modals over itself.
+    for (name, control) in [
+        ("Options button", "Options button"),
+        ("Help button", "Help button"),
+    ] {
+        let frame = shell
+            .placements()
+            .iter()
+            .flat_map(|p| p.walk())
+            .find(|p| p.widget.name() == name)
+            .map(|p| p.frame)
+            .unwrap_or_else(|| panic!("the bottom bar's {name}"));
+        assert_eq!(
+            flow::nav_control_at(&shell, [frame.x + frame.w / 2.0, frame.y + frame.h / 2.0])
+                .as_deref(),
+            Some(control)
+        );
+    }
+    let base = shell.base_screen_id();
+    shell
+        .open_modal(&ra2_shell::bindings::help_target(3))
+        .unwrap();
+    assert_eq!(shell.window_depth(), 1);
+    assert!(
+        shell.window_placements().len() < shell.placements().len(),
+        "only the window is drawn over the bench"
+    );
+    shell.click_named("close button").unwrap();
+    assert_eq!(shell.window_depth(), 0);
+    assert_eq!(shell.base_screen_id(), base);
 
     // Entering writes nothing; the shell remembers the event and the robot
     // column for the round's start.
