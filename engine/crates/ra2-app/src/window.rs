@@ -509,11 +509,16 @@ impl App {
     /// out natively on the window, and edits the same staged `ra2.cfg` as the
     /// main menu's.
     fn open_match_options(&mut self) -> Result<(), String> {
-        if let Some(window) = &self.window {
-            let [w, h] = window_size(window);
-            self.shell.set_size([w as f32, h as f32]);
+        self.open_options_window()?;
+        if let Some(session) = self.live_match_mut() {
+            session.open_options();
         }
-        self.shell.open_modal(crate::options::SCREEN)?;
+        Ok(())
+    }
+
+    /// `options win` on the shell's window stack, synced from the staged `ra2.cfg`.
+    fn open_options_window(&mut self) -> Result<(), String> {
+        self.open_shell_window(crate::options::SCREEN)?;
         self.options.register_dropdowns(&mut self.shell);
         if let Err(error) = self.options.reload() {
             eprintln!("options: {error}; keeping the staged values");
@@ -521,10 +526,55 @@ impl App {
         if let Some(document) = self.shell.document_mut() {
             self.options.sync(document);
         }
-        if let Some(session) = self.live_match_mut() {
-            session.open_options();
-        }
         Ok(())
+    }
+
+    fn open_shell_window(&mut self, target: &str) -> Result<(), String> {
+        if let Some(window) = &self.window {
+            let [w, h] = window_size(window);
+            self.shell.set_size([w as f32, h as f32]);
+        }
+        self.shell.open_modal(target)
+    }
+
+    /// The event flow's repairs bench (the application's overlay over the shell's bracket screen)
+    /// has the shell's bottom bar, live (`event-repairs-help`, `event-repairs-options`, docs/36
+    /// 9.39): Help opens the Repairs help window (`help_repairs.gib`, help id 3 of `FUN_004e4ab0`),
+    /// Options the options window, both modal over the bench. A click while one is open goes to
+    /// the shell's window handling (Close, OK, Cancel, the options' own controls). Answers whether
+    /// the click was taken.
+    fn bench_bar_click(&mut self, point: [f32; 2]) -> Result<bool, String> {
+        if !(self.hq_from_shell && self.hq.as_ref().is_some_and(|hq| hq.on_repairs_screen())) {
+            return Ok(false);
+        }
+        if self.shell.window_depth() > 0 {
+            self.options_hit(point)?;
+            match self.shell.click(point[0], point[1]) {
+                Ok(step) => {
+                    println!("{}", crate::describe(&step));
+                    self.audio.shell_step(&step);
+                    self.apply_options_step(&step)?;
+                }
+                Err(error) => eprintln!("click {:.0},{:.0}: {error}", point[0], point[1]),
+            }
+            if Options::is_screen(&self.shell.screen_id()) {
+                if let Some(document) = self.shell.document_mut() {
+                    self.options.sync(document);
+                }
+            }
+            return Ok(true);
+        }
+        match crate::flow::nav_control_at(&self.shell, point).as_deref() {
+            Some("Help button") => {
+                self.open_shell_window(&ra2_shell::bindings::help_target(3))?;
+                Ok(true)
+            }
+            Some("Options button") => {
+                self.open_options_window()?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
     }
 
     /// A click while the options window is over the match: the options
@@ -709,6 +759,23 @@ impl App {
                 self.error = Some(format!("could not draw the HQ: {error}"));
                 event_loop.exit();
                 return;
+            }
+            if self.hq_from_shell && hq.on_repairs_screen() && self.shell.window_depth() > 0 {
+                // The bench's Help / Options window (`bench_bar_click`) is the shell's.
+                let windows = self.frames.windows_scene(&self.shell);
+                if let Err(error) = gpu.ui.render_over_to(
+                    &gpu.device,
+                    &gpu.queue,
+                    &windows,
+                    &view,
+                    format,
+                    size[0],
+                    size[1],
+                ) {
+                    self.error = Some(format!("could not draw the bench's window: {error}"));
+                    event_loop.exit();
+                    return;
+                }
             }
             gpu.queue.present(current);
             return;
@@ -1235,6 +1302,17 @@ impl ApplicationHandler for App {
                     // A click in a bar is no click at all.
                     return;
                 };
+                match self.bench_bar_click(point) {
+                    Ok(true) => {
+                        self.request_redraw();
+                        return;
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        self.fail(event_loop, error);
+                        return;
+                    }
+                }
                 if let Some(hq) = &mut self.hq {
                     // The event match's own HUD and pause dialog come first; the
                     // results' Continue is the event flow's.
