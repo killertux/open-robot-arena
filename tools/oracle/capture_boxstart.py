@@ -53,6 +53,10 @@ def main():
     if os.environ.get("AITRACE") == "1":
         print("aitrace install:", cd.run([cd.PY, os.path.join(cd.HERE, "ra2_python.py"),
                                           os.path.join(cd.HERE, "ai_trace_install.py")]).stdout)
+    # AILOG=1: every Input and every Evaluate of the brains (ai_log_install.py), read back after the fight (docs/29 12bg).
+    if os.environ.get("AILOG") == "1":
+        print("ailog install:", cd.run([cd.PY, os.path.join(cd.HERE, "ra2_python.py"),
+                                        os.path.join(cd.HERE, "ai_log_install.py")]).stdout)
     cd.start_match(os.environ.get("ARENA_ROW_Y", "188"))
     # PRIME=1 (frida/ra2_parts.js): ask each player's AI for GetComponentHealth(i) for
     # every id, so the agent's 0x4dd760 hook records the id -> component pointer map.
@@ -91,8 +95,10 @@ def main():
     with open(base + ".jsonl", "w") as f:
         for r in rows:
             f.write(json.dumps(r, separators=(",", ":")) + "\n")
-    json.dump({"name": name, "sim_seconds": sim[0], "rows": len(rows), "getWeight": weights},
-              open(base + ".json", "w"), indent=1)
+    meta = {"name": name, "sim_seconds": sim[0], "rows": len(rows), "getWeight": weights}
+    if os.environ.get("AILOG") == "1":
+        meta["ailog"] = cd.py("import __builtin__\nout.write(repr(__builtin__._ra2_ailog))")
+    json.dump(meta, open(base + ".json", "w"), indent=1)
     if sampler:
         with open(base + ".tsv", "w") as f:
             f.write("time_elapsed\t[(player, location, isUpsideDown, lastTactic, cmd_throttle, cmd_turn)]\n")

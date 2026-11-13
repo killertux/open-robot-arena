@@ -286,6 +286,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         duel.step_direct(&idle, DEFAULT_STEP);
     }
+    let mut scout_at: Option<Vec3> = None;
     let (secs, fire): (f32, Option<f32>) = match a[3].as_str() {
         "self" => {
             let axis_local = Vec3::new(a[4].parse()?, a[5].parse()?, a[6].parse()?).normalize();
@@ -322,6 +323,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Err(_) => at,
             };
             place(&mut duel, &snap, q, at, Vec3::ZERO, axis * w);
+            scout_at = Some(at);
             println!(
                 "placed centre {:.4} {:.4} {:.4} offset {:.4} {:.4} {:.4} q {:.5} {:.5} {:.5} {:.5} (w,x,y,z) axis {:.4} {:.4} {:.4} w {w}",
                 at.x, at.y, at.z, at.x - c0.x, at.y - c0.y, at.z - c0.z, q.w, q.x, q.y, q.z, axis.x, axis.y, axis.z
@@ -374,9 +376,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let snap1 = snapshot_of(&duel, 1);
         let c1 = snap1[0].1;
         let r1 = snap1[0].2;
-        let target = Vec3::new(c0.x + dist * az.cos(), c1.y + 0.03, c0.z + dist * az.sin());
+        // `TIPPROBE_ALARM_REL=1`: from the tipped robot's placed centre rather than its rest centre.
+        let base = if std::env::var_os("TIPPROBE_ALARM_REL").is_some() {
+            scout_at.unwrap_or(c0)
+        } else {
+            c0
+        };
+        let target = Vec3::new(
+            base.x + dist * az.cos(),
+            c1.y + 0.03,
+            base.z + dist * az.sin(),
+        );
         let f0 = r1 * duel.robots[1].rig.forward();
-        let u = Vec3::new(c0.x - target.x, 0.0, c0.z - target.z).normalize();
+        let u = Vec3::new(base.x - target.x, 0.0, base.z - target.z).normalize();
         let psi = u.x.atan2(u.z) - f0.x.atan2(f0.z);
         // Bodies are put in place at the release like the first group.
         place(
@@ -418,6 +430,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .collect();
     let mut command = DriveInput::default();
+    // `TIPPROBE_AI=1`: from the release on the shipped brains drive both robots (as in a fight,
+    // `Duel::step`), and each substep also prints the other robot's chassis (`A` lines).
+    let ai = std::env::var_os("TIPPROBE_AI").is_some();
+    // `TIPPROBE_AI_AT=<substeps>`: the brains are switched on that many substeps after the release (the live
+    // capture's Python call takes a few frames: `AION` rows of `capture_tailfight.py`); until then the robots idle.
+    let ai_at: usize = std::env::var("TIPPROBE_AI_AT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
     let steps = (secs / DEFAULT_STEP).round() as usize;
     let chassis = duel.robots[robot_index()].parts[0].body;
     for i in 0..steps {
@@ -458,9 +479,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(&(_, th, tu)) = drive.iter().rfind(|d| d.0 == i) {
             command = DriveInput::new(th / 100.0, tu / 100.0);
         }
-        let mut inputs = idle.clone();
-        inputs[robot_index()] = command;
-        duel.step_direct(&inputs, DEFAULT_STEP);
+        if ai {
+            let other = 1 - robot_index();
+            let ob = duel.robots[other].parts[0].body;
+            let os = duel.physics.state(ob).unwrap();
+            let oc = duel.physics.center_of_mass(ob).unwrap();
+            let ou = os.rotation * Vec3::Y;
+            println!(
+                "A {t:.4} c {:.4} {:.4} {:.4} up {:.4} {:.4} {:.4}",
+                oc.x, oc.y, oc.z, ou.x, ou.y, ou.z
+            );
+        }
+        if ai && i >= ai_at {
+            duel.step(DEFAULT_STEP);
+        } else {
+            let mut inputs = idle.clone();
+            inputs[robot_index()] = command;
+            duel.step_direct(&inputs, DEFAULT_STEP);
+        }
     }
     Ok(())
 }
