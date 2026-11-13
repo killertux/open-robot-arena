@@ -1,0 +1,28 @@
+{
+ "name": "wheelspin-scout-air-hinge",
+ "trials": [
+  {
+   "label": "scout 12 m up, drive 100/0",
+   "axis": [
+    1,
+    0,
+    0
+   ],
+   "deg": 0,
+   "w": 0,
+   "dcentre": [
+    0,
+    12,
+    0
+   ],
+   "steps": 100,
+   "drive_py": [
+    [
+     0,
+     100,
+     0
+    ]
+   ]
+  }
+ ]
+}

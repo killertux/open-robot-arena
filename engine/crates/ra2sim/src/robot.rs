@@ -1937,6 +1937,11 @@ impl Robot {
             suspension: Self::steering_up(rig, &info)
                 .map(|up| frame_a.inverse().transform_vector3(up).normalize_or_zero())
                 .filter(|_| std::env::var_os("RA2_STEER_HINGE").is_none()),
+            axis_scale: if std::env::var_os("RA2_HINGE_UNIT_AXIS").is_some() {
+                1.0
+            } else {
+                info.axis_len
+            },
         };
         physics.create_hinge(&desc)
     }

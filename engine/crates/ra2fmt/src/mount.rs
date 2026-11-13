@@ -200,6 +200,9 @@ pub struct RotorHinge {
     pub axis: Vec3,
     /// The rotor object's own transform (`TM`).
     pub rotor_tm: Mat4,
+    /// The length of the file's `*SPIN_AXIS`: the original's hinge atom keeps that axis as it is,
+    /// not normalized (0.8 on `Styles\anglemotor2`, 1 on the other motors), docs/29 section 12bi.
+    pub axis_len: f32,
 }
 
 impl MountFrames {
@@ -289,6 +292,10 @@ pub fn rotor_hinge(scene: &crate::gmi::GmiScene) -> Option<RotorHinge> {
         pivot: Vec3::from(h.frame[3]),
         axis: if axis == Vec3::ZERO { Vec3::Z } else { axis },
         rotor_tm,
+        axis_len: match Vec3::from(h.spin_axis).length() {
+            l if l > 1e-3 => l,
+            _ => 1.0,
+        },
     })
 }
 
@@ -680,6 +687,7 @@ mod tests {
             pivot: Vec3::new(0.0, 0.0, -0.058),
             axis: Vec3::Z,
             rotor_tm: Mat4::from_translation(Vec3::new(0.0, 0.0, -0.059)),
+            axis_len: 1.0,
         };
         let r = burst_rotor(housing, &hinge, 3.05433);
         let y = r.transform_vector3(Vec3::Y);

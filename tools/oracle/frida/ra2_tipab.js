@@ -86,6 +86,21 @@ let plan = null, rest = null;
 Interceptor.attach(ptr('0x446810'), { onEnter() { if (plan) push(['FM', ++seq, this.context.ecx.toString()]); } });
 Interceptor.attach(ptr('0x448750'), { onEnter() { if (plan) push(['BF', ++seq, this.context.ecx.toString()]); } });
 const restExtra = new Map();
+// HN [HN,seq,atom,bodyA,bodyB,limited,motor,[+0x78 .. +0x9c floats],param4,param5] every hinge atom set-up (0x535a50) of a body
+// the plan or `watch` names, while a plan runs and `hinge(true)` was asked for (docs/29 12bi: the wheel hinges' flags, limits
+// and the servo's target angle each substep; last: the atom's frames, floats +0x18..+0x77).
+let hingeRows = false;
+Interceptor.attach(ptr('0x535a50'), { onEnter() {
+  if (!plan || !hingeRows) return;
+  try {
+    const a = this.context.ecx;
+    const bA = a.add(0xc).readPointer(), bB = a.add(0x10).readPointer();
+    if (!watch || !(watch.some(w => w.equals(bA)) || watch.some(w => w.equals(bB)))) return;
+    push(['HN', ++seq, a.toString(), bA.toString(), bB.toString(), a.add(0x80).readU8(), a.add(0x81).readU8(),
+          floats(a.add(0x78), 0x28), f(this.context.esp.add(0xc)), f(this.context.esp.add(0x10)),
+          floats(a.add(0x18), 0x60)]);
+  } catch (e) { push(['E', ++seq, 'hn ' + e]); }
+} });
 const fire = new NativeFunction(ptr('0x448650'), 'void', ['pointer'], 'thiscall');
 Interceptor.attach(ptr('0x52aa60'), { onEnter() {
   if (!plan) return;
@@ -118,7 +133,11 @@ Interceptor.attach(ptr('0x52aa60'), { onEnter() {
       P.ptrs.forEach((p, i) => {
         const com = add(P.centre, qrot(Q, sub(P.snap[i].com, c0)));
         const v = add(P.v, cross(w, sub(com, P.centre)));
-        writeState(p, com, qmul(Q, P.snap[i].q), v, w);
+        // wspin (docs/29 12bi): [[body index, [x,y,z] in the chassis' frame], ...] a body's own angular
+        // velocity (absolute, replacing the rigid field's), to spin one wheel about its axle.
+        let wi = w;
+        for (const ws of (P.wspin || [])) if (ws[0] === i) wi = qrot(qmul(Q, P.snap[0].q), ws[1]);
+        writeState(p, com, qmul(Q, P.snap[i].q), v, wi);
       });
       dumpX('place', P.ptrs);
       for (const G of (P.extra || [])) {
@@ -225,6 +244,7 @@ rpc.exports = {
   learnAt(addr) { learn(ptr(addr)); return f(ptr(addr).add(0x190)); },
   peek(addr, len) { return floats(ptr(addr), len); },
   peekPtrs(addr, n) { const o = []; for (let i = 0; i < n; i++) o.push(ptr(addr).add(4 * i).readPointer().toString()); return o; },
+  hinge(on) { hingeRows = !!on; return true; },
   wheels(on) { wheelRows = !!on; return true; },
   watch(list) { watch = list ? list.map(s => ptr(s)) : null; return true; },
   arm(p) {

@@ -1,0 +1,51 @@
+{
+ "name": "wheelspin-scout-air-drive",
+ "trials": [
+  {
+   "label": "scout 12 m up, drive 100/0",
+   "axis": [
+    1,
+    0,
+    0
+   ],
+   "deg": 0,
+   "w": 0,
+   "dcentre": [
+    0,
+    12,
+    0
+   ],
+   "steps": 130,
+   "drive_py": [
+    [
+     0,
+     100,
+     0
+    ]
+   ]
+  },
+  {
+   "label": "scout 12 m up, drive 100/100",
+   "axis": [
+    1,
+    0,
+    0
+   ],
+   "deg": 0,
+   "w": 0,
+   "dcentre": [
+    0,
+    12,
+    0
+   ],
+   "steps": 130,
+   "drive_py": [
+    [
+     0,
+     100,
+     100
+    ]
+   ]
+  }
+ ]
+}
