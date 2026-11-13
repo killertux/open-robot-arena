@@ -2155,3 +2155,57 @@ from the 1.11 team design in its chassis (and in carrying a SmartZone); nothing 
   original stop responding at Start Game (`uiFrames` stopped, the game idle); the session was stopped, the prefix restored (sha256 equal except `ra2.cfg`, which the session's own stop restored). Not repeated; a human-slot route would be the way.
 * The 9.39 probe `plus.damage(0, c, 1 + c)` for c = 0..39 saw no loss at index 16 (the second sledgehammer); ours loses 17 there. Either the live loop did not reach 16 or the weapon absorbs it; the test covers 0..=15 only.
 * Tools added: `ra2fmt` example `dumpbot` (name, count, version, chassis hitpoints, SmartZones of bots), `ra2sim` example `partcount` (index, class, hitpoints of a rig).
+
+## 9.41 UI fidelity pass: what the worst fixtures really were (`fx/uipass`, 2026-11-13)
+
+Task: run the whole `tools/oracle/fidelity.py --renderer app` suite, rank, classify the worst fixtures as a rendering/layout gap or a capture/state gap, fix the real ones. No live session was needed (no new capture, prefix untouched).
+
+### 1. Ranking and classification (115 fixtures, baseline mean 1.69)
+
+The first full run with `--jobs 4` gave `event-repairs-atom` 3.68, `event-repairs` 4.18 and `event-award-photo` 4.45: **a harness race, not a rendering gap** (the hq-frame cache named its directories by `len(_FRAMES)` from several threads and handed one fixture another's frame; with `--jobs 1` the same fixtures are 1.06 / 1.25 / 1.76). Fixed with a lock (`_FRAMES_LOCK`). Clean baseline above.
+
+| fixture (baseline MAE) | what it is | class | action |
+|---|---|---|---|
+| arena-metalskull-f2 12.7, arena-electric-intro / -countdown 11.0 / 9.5, arena-parkinglot-f2 6.6, arena-octagon-f2/f4 5.5, arena-*-intro, -countdown (old wall-clock references) | fights with different robot poses, and stills taken at a wall time the original's load stall moved (docs/34 9.3, manifest `note-unreliable-references`: e.g. the "Overhead" label is off in the reference, on in ours) | state / timing, not rendering | none (the state-hooked `-intro2` / `-countdown2` references replace them) |
+| arena-*-intro2 (state-hooked): bridge 8.1, halfcircle 6.1, metalskull 5.0, electric 4.8 | the still is the right place of the right flight, but our still was taken on the 1/60 s step grid | **real (our harness / app)** | below, section 2 |
+| event-bracket-duel-round1 4.9 | the 16-team field order: the reference was drawn from an engine LCG state nobody read (`event-bracket-lcg-duel`, state read live, is 1.3 with the same route) | state | none |
+| event-award-photo 1.76 | the original won one of two rounds (autographed photo), ours is a simulated lost round (Fruity-Punch) | state | none |
+| match-f1 3.5, match-pause 3.1 | the fight behind the box differs | state | none |
+| teamhq-import-dialog 1.48 | the original's Import Robot Design window opens with the **first design's snapshot already in the preview** (no row highlighted); ours showed an empty frame | **real** | section 3 |
+| options-resolution-open 1.14 | the field and the highlighted row show the *current mode*: the references ran at 1024x768, `local/game/ra2.cfg` says 1280x1024 | state (scratch cfg) | section 4 |
+
+### 2. Intro stills at the exact flight time
+
+`--camera-shots intro@T` fired on the first fixed 1/60 s step with `intro_time >= T`, so the still was up to 17 ms off, which on the fast flights is several pixels. `run_camera_shots` now cuts the step that crosses T short (`config.dt` for that one step) **when the intro still is the only shot left**; runs with later shots (skip, countdown, fight cameras) keep whole steps, so their fixed-step history is unchanged (a first attempt that cut steps in every run moved `arena-electric-countdown` 9 -> 29 and `arena-metalskull-f2` 13 -> 26, rejected). `fidelity.py` takes the state-hooked arenas in two runs (the lone intro still, then countdown / F4).
+
+With the still off the grid the camera-time law (`T = intro clock - first_frame_dt - 0.265`) is visibly not exact: sweeping T in 5-10 ms steps against each `intro2` reference gives sharp minima (MAE 0.2-2.6) at an arena-specific residual of 0 to 0.04 s (bridge +0.040, box +0.025, compressor +0.004, electric +0.010, halfcircle +0.040, metalskull +0.040, octagon +0.012, parkinglot +0.012). It does not follow the first frame's dt (0.19-1.28 s); `INTRO_FIT_DELTA` in `fidelity.py` is therefore a **measured calibration (+-0.005 s)**, not a model. Unexplained: what makes the original's intro camera lead by 0-0.04 s per arena (open).
+
+### 3. The import window's preview (`ra2-shell`)
+
+`Shell::ask_import` now fills the preview right after opening (`refresh_import_preview`), and the preview follows the selected row or, with none selected, row 0 (the live window shows `XTRA_Atom Smasher`'s snapshot, the first design in byte order, with no highlight).
+
+### 4. The scratch install's resolution
+
+`scratch_install` sets `FSDisplayWidth/Height` and `FS3DDisplay*` to 1024x768 in **its copy** of `ra2.cfg` (the references' mode); `local/game` is not touched.
+
+### 5. Numbers (`fidelity.py --renderer app`, MAE)
+
+| fixture | before | after |
+|---|---:|---:|
+| arena-bridge-intro2 | 8.07 | 2.63 |
+| arena-halfcircle-intro2 | 6.05 | 1.38 |
+| arena-metalskull-intro2 | 4.99 | 0.98 |
+| arena-electric-intro2 | 4.78 | 1.19 |
+| arena-box-intro2 | 1.63 | 0.16 |
+| arena-octagon-intro2 | 2.14 | 0.71 |
+| arena-compressor-intro2 | 2.39 | 0.96 |
+| arena-parkinglot-intro2 | 1.37 | 1.50 |
+| options-resolution-open | 1.14 | 0.76 |
+| teamhq-import-dialog | 1.48 | 1.20 |
+| **suite mean (115)** | **1.69** (the unraced baseline; the raw run read 1.71) | **1.50** |
+
+### Open
+* The 0-0.04 s per-arena lead of the original's intro camera over the clock law (2).
+* The Repairs bench shadow-edge residual (9.39) was not touched: identifying the quad needs a texture-loader hook in a live session, which this pass did not use.
+* `event-bracket-duel-round1`: an LCG-state search (as 9.23 did for the tabletop) would pin it; not worth a fit when `event-bracket-lcg-duel` is the exact twin.
+* The old wall-clock `arena-*-intro` / `-countdown` references stay scored; their remaining gap is the unreproducible load stall.

@@ -1742,7 +1742,9 @@ pub fn run_camera_shots(options: Options, shots: &[String]) -> Result<(), String
         // Shots are taken in the order given: only the first can fire.
         let fire = pending.first().and_then(|(_, shot)| {
             let ready = match *shot {
-                Shot::Intro(t) | Shot::Skip(t) => state == MatchState::Intro && intro_time >= t,
+                Shot::Intro(t) | Shot::Skip(t) => {
+                    state == MatchState::Intro && intro_time >= t - 1e-4
+                }
                 Shot::Countdown(n) => state == MatchState::Countdown && countdown == Some(n),
                 Shot::CountdownLeft(r) => {
                     state == MatchState::Countdown && session.matched.countdown_left() <= r
@@ -1784,10 +1786,25 @@ pub fn run_camera_shots(options: Options, shots: &[String]) -> Result<(), String
                 pending.iter().map(|p| p.0.clone()).collect::<Vec<_>>()
             ));
         }
+        // The intro flight is photographed at the exact second asked for, as the original's
+        // variable frame time reaches it: the step that would cross T is cut short to land on
+        // T (a fixed 1/60 s step quantised the still by up to 17 ms, which at the flight's
+        // speed is several pixels; docs/36 9.41).
+        let mut step_dt = dt;
         if state == MatchState::Intro {
-            intro_time += dt;
+            // Only a lone intro still: a later shot (the countdown, a fight camera) must see the
+            // same fixed-step history as before, so those runs keep whole steps.
+            if let [(_, Shot::Intro(t))] = pending.as_slice() {
+                let left = *t - intro_time;
+                if left > 1e-4 && left < dt {
+                    step_dt = left;
+                }
+            }
+            intro_time += step_dt;
         }
+        session.matched.config.dt = step_dt;
         session.step();
+        session.matched.config.dt = dt;
     }
     Ok(())
 }
