@@ -2822,7 +2822,7 @@ mod tests {
     }
 
     /// Live (docs/36 9.39, `event-repairs-triples`): `plus.damage(0, c, 35, point)` for c = 1..8 on
-    /// Atom Smasher took hitpoints off only the components 4-7 (`FUN_004df6e0` logged 365 / 400 for
+    /// the career team's Atom Smasher took hitpoints off only the components 4-7 (`FUN_004df6e0` logged 365 / 400 for
     /// ids 4-7 and full hitpoints for 1-3 and 8, 9), so the bench made four rows. Components 1-3
     /// (the casters and the angle motor mounted straight on the chassis) and 8, 9 absorb the
     /// request without losing hitpoints.
@@ -2830,7 +2830,9 @@ mod tests {
     fn plus_damage_on_components_one_to_eight_of_atom_smasher_costs_four_components_hitpoints() {
         let Some(game) = game_dir() else { return };
         let _guard = ra2script::lock();
-        let atom = game.join("Robot Designs/XTRA_Atom Smasher.bot");
+        // The robot the 9.39 / 9.40 live logs saw: the career team's Atom Smasher (1.11, 17 components), not
+        // `Robot Designs/XTRA_Atom Smasher.bot` (1.07, 18 components, chassis 1604).
+        let atom = game.join("Teams/Team0/Bot4.bot");
         if !atom.is_file() {
             return;
         }
@@ -2859,6 +2861,8 @@ mod tests {
         // taken the first: the losses were exactly 1 + c at 0, 4-7 and 10-15, nothing at 1-3, 8, 9).
         let duel = &mut session.matched.duel;
         let before = duel.robots[0].health.clone();
+        // 0..=15 only: live (9.40) the probe saw no loss at 16 (the second sledgehammer) where ours loses 17; whether
+        // the live loop stopped at 15 or the weapon really absorbs it is open.
         for c in 0..=15usize {
             duel.apply_hit_with(0.0, None, 0, c, 1.0 + c as f32, point);
         }

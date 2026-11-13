@@ -2104,8 +2104,7 @@ was cut off by an expired login and the prefix, re-saved by another session, was
 * Probe `plus.damage(0, c, 1 + c)` for c = 0..39: the losses were exactly `1 + c` at indices 0, 4-7, 10-15 and **zero at 1, 2, 3, 8, 9**; other indices do not exist. The lookup (`FUN_004dd780`, a map keyed by the component
   id = design index) does resolve 1-3, 8, 9; they just keep their hitpoints (the mount-depth rule `Robot::damage` already has: a part bolted straight to the chassis that is not damageable loses nothing).
 * **Ours already does it.** New test `plus_damage_on_components_one_to_eight_of_atom_smasher_costs_four_components_hitpoints` (`match_mode.rs`): the same two patterns on Atom Smasher give hits at {4,5,6,7} and
-  {0,4-7,10-15} with the live amounts. No model change. (Ours has 18 parts, the live robot 17, and ours' chassis hitpoints sum to 1604 against the live 534; the order from index 14 on also differs, which the bench's row
-  count does not see; open.) Gotchas for the next live round: the human robot is reaped by the immobility rule after about 20 s, an AI that is not neutered kills it, and a round lost ends the event: neuter the AI
+  {0,4-7,10-15} with the live amounts. No model change. (Ours has 18 parts, the live robot 17, and ours' chassis hitpoints sum to 1604 against the live 534: **a wrong comparison, resolved in 9.40** - the live robot is the career team's Atom Smasher `Teams/Team0/Bot4.bot`, not `Robot Designs/XTRA_Atom Smasher.bot`.) Gotchas for the next live round: the human robot is reaped by the immobility rule after about 20 s, an AI that is not neutered kills it, and a round lost ends the event: neuter the AI
   (`AI.running_ai[..].Think = nop`) and call `plus.eliminatePlayer(p)` for every other player in the same script, after a trivial `ra2_python -c` probe (the first Python call after a match start sometimes never runs).
 * Second pattern: BBA Midwest round 2 and Sawblade round 1 were lost to the immobility rule before the script ran, so the second pattern is the bench-less probe above; a 4-player Blackvolt bench gave 4 rows again.
 
@@ -2126,4 +2125,33 @@ identified (the hook sees texture pointers, not names), so no change was made (`
 
 ### Open
 * The identity of the draw that adds the 10 % bluish mix at the left / right frame edge (needs the texture name per pointer, e.g. a hook on the texture loader).
-* Ours has 18 parts for Atom Smasher where the live robot has 17, and a different order after index 13.
+* (Closed in 9.40: the 18 / 17 and 1604 / 534 difference was a different design file.)
+
+## 9.40 The "extra component" and the 1604 / 534 chassis of Atom Smasher were two different robots (`fx/partcount`, 2026-11-13)
+
+Task: find why ours built 18 components and 1604 chassis hitpoints for Atom Smasher where the live `FUN_004df6e0` log (9.39) had 17 and 534, in a different order from index 14 on.
+
+### 1. Resolution: the live robot is the career team's design, not the library's
+
+* The match the 9.39 log came from was a career event; the robot in it is the team's own file, `Teams/Team0/Bot4.bot` (format **1.11**, name Atom Smasher, 17 components: ... 13 extender, **14 supervolt battery, 15-16 the two sledgehammers**, no SmartZone). The
+  design the 9.39 comparison used, `Robot Designs/XTRA_Atom Smasher.bot`, is another file with the same name: format **1.07**, 18 components (weapons at 14-15, battery at 16, a SmartZone at 17), the same armour row
+  (type 3, 16, hardness 300) but a different chassis mesh (area 5.349, so trunc(5.349 x 300) = 1604). The career file's mesh gives 534 (area 1.78 x 300).
+* Ours loads the career file exactly as live: 17 components in that order, hitpoints `534 400 400 400 400 400 400 400 1000 1000 400 400 100 100 400 1000 1000`, equal to the live triples entry for entry. **No engine change was needed**; the component
+  factory order (file order, `FUN_004de450` calls `FUN_004dbf40` per component in the file's order, the id being the factory counter `[factory+0x7c]`) and the hitpoint rules (chassis `FUN_0044d710`: trunc(0.5 x sum of triangle areas x armour hardness,
+  `[armour+0x40]`; others: the type switch + the file's `hitpoints`) were already ported.
+* Live data for the other robots was already in the oracle: the K rows of the `partsfight-*` captures (`0x4dd760` componentById, `[c+0xe8]` = max) list every component of both robots of a fight. New test
+  `components_and_maximum_hitpoints_match_the_original_per_robot` (`ra2sim/tests/hitpoints.rs`, data `tests/data/partcount_live.tsv`, 112 rows) checks count, order and maximum of **Scout (11), ALARM (16), Razor (15), FlapJack (14),
+  Sentinel (13), Wide Load (23) and the career Atom Smasher (17)**: all equal (chassis 1828, 2662, 2319, 1820, ..., 534; every other component 100 / 400 / 1000 as the type switch gives). Captures: `partsfight-scout-alarm-box__live__000`,
+  `partsfight-razor-flapjack-box__live__000`, `partsfight-sentinel-wideload-compressor__live__000`, `event-repairs-triples__live__000`. (No new live capture: see Open.)
+* `plus_damage_on_components_one_to_eight_of_atom_smasher_costs_four_components_hitpoints` now runs on the career file (17 components); the patterns {4-7} and {0, 4-7, 10-15} still hold.
+
+### 2. Effects
+
+Damage-to-kill, hits and match length are unchanged (ours already had the right hitpoints for every robot checked), so no ensemble was re-measured and no environment switch exists. The 1.07 library design is the one that differs
+from the 1.11 team design in its chassis (and in carrying a SmartZone); nothing in ours treats it wrongly as far as the file says.
+
+### Open
+* A live capture of the 1.07 `Robot Designs/XTRA_Atom Smasher.bot` itself (chassis hitpoints: ours 1604 from its mesh; component order and the SmartZone) was attempted: the design copied over an exhibition slot (`AI/Team0/Bot1.bot`) made the
+  original stop responding at Start Game (`uiFrames` stopped, the game idle); the session was stopped, the prefix restored (sha256 equal except `ra2.cfg`, which the session's own stop restored). Not repeated; a human-slot route would be the way.
+* The 9.39 probe `plus.damage(0, c, 1 + c)` for c = 0..39 saw no loss at index 16 (the second sledgehammer); ours loses 17 there. Either the live loop did not reach 16 or the weapon absorbs it; the test covers 0..=15 only.
+* Tools added: `ra2fmt` example `dumpbot` (name, count, version, chassis hitpoints, SmartZones of bots), `ra2sim` example `partcount` (index, class, hitpoints of a rig).
