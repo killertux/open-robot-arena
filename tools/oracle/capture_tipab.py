@@ -157,6 +157,8 @@ def main():
         print("second robot rest", c_two, q_two)
         watched += [b[0] for b in bodies2]
     ag.api.watch(watched)
+    if os.environ.get("HINGE"):
+        ag.api.hinge(True)  # HN rows: every hinge atom set-up of the watched bodies (docs/29 12bi)
     ptrs = [b[0] for b in bodies]
     first = int(os.environ.get("FIRST", "0"))
     last = int(os.environ.get("LAST", str(len(grid["trials"]))))
@@ -166,7 +168,7 @@ def main():
         plan = {"bodies": ptrs, "hold": t.get("hold", 30), "lift": 1.0, "axis": t["axis"],
                 "angle": math.radians(t["deg"]), "w": t["w"], "v": t.get("v", [0, 0, 0]),
                 "centre": t.get("centre"), "dcentre": t.get("dcentre"), "steps": t.get("steps", 240), "fire": t.get("fire", -1),
-                "piston": t.get("piston")}
+                "piston": t.get("piston"), "wspin": t.get("wspin")}
         if i == first and os.environ.get("REST"):
             plan["rest"] = json.load(open(os.environ["REST"]))
         if "extra" in t:

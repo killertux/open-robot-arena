@@ -83,6 +83,11 @@ pub struct Joint {
     /// block then locks only the two directions across it, and a limit of
     /// `[0, 0]` holds B along it once per solver call.
     pub suspension: Option<Vec3>,
+    /// The length of the hinge axis the atom keeps (`atom + 0x28 / 0x48`): the `.gmf`'s `*SPIN_AXIS`
+    /// as it is, not normalized (0.8 on `Styles\anglemotor2`). The angle the servo and the limits
+    /// measure is `atan2(len · (a × b) · axis, a · b)` (`0x535a50`), so a short axis bends it twice
+    /// a turn (docs/29 section 12bi).
+    pub axis_scale: f32,
 }
 
 /// A row of a block: the Jacobian against each body's linear and angular
@@ -94,6 +99,14 @@ struct Row {
     lin_b: Vec3,
     ang_b: Vec3,
     error: f32,
+}
+
+/// `RA2_SERVO_WRAP=1`: the servo's target angle is wrapped to (-pi, pi] on every call, and pulled to
+/// within pi of the angle when the motor comes on (the old path).
+pub(crate) fn servo_wraps_target() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("RA2_SERVO_WRAP").is_some())
 }
 
 pub(crate) fn wrap(angle: f32) -> f32 {
@@ -133,7 +146,7 @@ impl Joint {
             } => {
                 let axis = a.rotation * *axis_a;
                 let (ra, rb) = (a.rotation * *ref_a, b.rotation * *ref_b);
-                ra.cross(rb).dot(axis).atan2(ra.dot(rb))
+                (self.axis_scale * ra.cross(rb).dot(axis)).atan2(ra.dot(rb))
             }
             Kind::Slider { axis_a, .. } => {
                 let (pa, pb) = self.anchors(bodies);
@@ -304,7 +317,13 @@ impl Joint {
                 lambda *= s;
                 self.target = next - (1.0 - s) * err;
             }
-            if angular {
+            // The original never wraps the target while the motor runs (`0x535a50`
+            // stores `+0x98` as it is, and the error is wrapped once only): a free
+            // wheel's target climbs to 10 rad and falls back through the cap's slip
+            // once a turn (live, `tipab-wheelspin-scout-air-hinge`: spikes of 37.6,
+            // 16.5, 4.7, 14.4 rad/s once a turn). `RA2_SERVO_WRAP=1` wraps it on
+            // every call as before (docs/29 section 12bi).
+            if angular && servo_wraps_target() {
                 self.target = wrap(self.target);
             }
         } else if self.friction > 0.0 {
@@ -593,6 +612,7 @@ pub fn replay_wheel(
         saved_limits: None,
         steer_rest: None,
         suspension: Some(suspension.normalize_or_zero()),
+        axis_scale: 1.0,
     };
     let state = |b: &[Body]| {
         [
@@ -813,6 +833,7 @@ mod tests {
             saved_limits: None,
             steer_rest: None,
             suspension: None,
+            axis_scale: 1.0,
         }
     }
 
@@ -829,7 +850,7 @@ mod tests {
         let dt = 1.0 / 60.0;
         let mut largest = 0.0f32;
         let mut late = Vec::new();
-        for step in 0..240 {
+        for step in 0..28 {
             let before = bodies[1].angular_velocity.x;
             solve(&mut bodies, &mut joints, dt);
             // Integrate the orientation the way the world does.
@@ -839,7 +860,8 @@ mod tests {
                 (q + Quat::from_xyzw(w.x, w.y, w.z, 0.0) * q * (0.5 * dt)).normalize();
             bodies[1].refresh_inertia();
             largest = largest.max((bodies[1].angular_velocity.x - before).abs());
-            if step >= 180 {
+            // Before the first knock of the unwrapped target (about call 30).
+            if (12..28).contains(&step) {
                 late.push(bodies[1].angular_velocity.x);
             }
         }
@@ -853,6 +875,90 @@ mod tests {
         // 17.11 here, and live ω_rel = 17.13..17.16 at the 17 rad/s target.
         let mean = late.iter().sum::<f32>() / late.len() as f32;
         assert!((mean - 17.11).abs() < 0.05, "{mean} in {lo}..{hi}");
+    }
+
+    /// A free wheel driven in the air, `steps` calls, as a chain of angular velocities relative to the
+    /// static base; the target starts where the angle is.
+    fn free_wheel_run(axis_scale: f32, steps: usize) -> Vec<f32> {
+        let mut bodies = vec![
+            body(MotionType::Static, 0.0, 1.0),
+            body(MotionType::Dynamic, 27.0, 0.45),
+        ];
+        let mut joints = vec![Joint {
+            axis_scale,
+            ..hinge(675.0, 17.0)
+        }];
+        let dt = 1.0 / 60.0;
+        let mut out = Vec::new();
+        for _ in 0..steps {
+            solve(&mut bodies, &mut joints, dt);
+            let w = bodies[1].angular_velocity;
+            let q = bodies[1].rotation;
+            bodies[1].rotation =
+                (q + Quat::from_xyzw(w.x, w.y, w.z, 0.0) * q * (0.5 * dt)).normalize();
+            bodies[1].refresh_inertia();
+            out.push(w.x);
+        }
+        out
+    }
+
+    /// The servo's target is never wrapped while the motor runs (`0x535a50`) and its error is wrapped
+    /// once only, so a wheel spinning free is knocked once a turn: live
+    /// (`tipab-wheelspin-scout-air-hinge__live__001`, the anglemotor1 wheel, one call each) 17.1,
+    /// 37.63, 16.54, 4.67, 14.44, 16.58, 16.99, 17.08, every 22 calls (the turn takes 22 calls at
+    /// 17 rad/s). Ours: 37.5, 16.5, 5.0, 14.3, 16.3, 17.1 (docs/29 section 12bi).
+    #[test]
+    fn a_free_wheel_is_knocked_once_a_turn_by_its_unwrapped_target() {
+        let run = free_wheel_run(1.0, 200);
+        let spikes: Vec<usize> = (20..200).filter(|&k| run[k] > 30.0).collect();
+        assert!(spikes.len() >= 6, "{spikes:?}");
+        for w in spikes.windows(2) {
+            assert!((21..=23).contains(&(w[1] - w[0])), "{spikes:?}");
+        }
+        let k = spikes[1];
+        // The ring-down's shape: up by the cap, back under the target, a low, back up, settled (the
+        // robot's wheel, whose chassis gives a little, has the live 37.6 / 16.5 / 4.7 / 14.4).
+        assert!(run[k] > 35.0 && run[k + 1] < 20.0, "{:?}", &run[k..k + 6]);
+        assert!(
+            run[k + 2] < 10.0 && (10.0..17.0).contains(&run[k + 3]),
+            "{:?}",
+            &run[k..k + 6]
+        );
+        // Between the knocks it holds the servo's 17.1.
+        let quiet = &run[k + 8..k + 20];
+        assert!(quiet.iter().all(|w| (w - 17.1).abs() < 0.1), "{quiet:?}");
+    }
+
+    /// An axis the atom keeps 0.8 long (`Styles\anglemotor2`, `*SPIN_AXIS` `(0, 0, -0.8)`) bends the
+    /// measured angle, and the servo swings 13.7-21.2 rad/s twice a turn (live, the same capture's
+    /// other wheel: 13.70 .. 21.18, maxima 11 calls apart).
+    #[test]
+    fn a_short_axis_swings_the_servo_twice_a_turn() {
+        let run = free_wheel_run(0.8, 200);
+        let late = &run[100..200];
+        // The knocks (>= 30) aside, the swing.
+        let calm: Vec<f32> = late
+            .iter()
+            .copied()
+            .filter(|w| (8.0..30.0).contains(w))
+            .collect();
+        let (lo, hi) = calm
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(a, b), &w| (a.min(w), b.max(w)));
+        assert!(
+            (13.0..14.5).contains(&lo) && (20.5..22.0).contains(&hi),
+            "{lo} .. {hi}"
+        );
+        let peaks: Vec<usize> = (101..199)
+            .filter(|&k| run[k] > 20.5 && run[k] >= run[k - 1] && run[k] > run[k + 1])
+            .collect();
+        assert!(peaks.len() >= 6, "{peaks:?}");
+        assert!(
+            peaks
+                .windows(2)
+                .all(|w| (10..=12).contains(&(w[1] - w[0])) || w[1] - w[0] > 12),
+            "{peaks:?}"
+        );
     }
 
     #[test]

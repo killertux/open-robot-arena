@@ -349,6 +349,10 @@ pub struct HingeDesc {
     /// like a hinge's limit, and the block locks only the two directions
     /// across it.
     pub suspension: Option<Vec3>,
+    /// The length of the hinge axis the original keeps (the `.gmf`'s `*SPIN_AXIS`, not normalized:
+    /// 0.8 on `anglemotor2`), which bends the angle it measures (docs/29 section 12bi). `0` and `1`
+    /// are a unit axis.
+    pub axis_scale: f32,
 }
 
 impl HingeDesc {
@@ -365,6 +369,7 @@ impl HingeDesc {
             max_torque: 0.0,
             friction_torque: 0.0,
             suspension: None,
+            axis_scale: 1.0,
         }
     }
 

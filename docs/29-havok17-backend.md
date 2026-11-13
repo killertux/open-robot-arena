@@ -8683,3 +8683,48 @@ live has 2 in about 670 s of fight (0.003 a second; ours' rate would give 8, P a
 **6. Sentinel push (task 3):** not worked on. **Tools:** `length_window_cmp.py`. No engine change, so no switch and no new engine test; the Compressor and Octagon ensembles were not re-run (12bf's 83.5 / 18.0 stand).
 
 **Open.** The Scout's tail persistence (it ends 27 % against 14 % of the fights before 60 s); the FlapJack's late chassis hits; the front wheels' lost spin; the in-air swing; the Sentinel's push; the Razor live fights (15) for the 0.6.
+
+### 12bi. The wheels' servo: the target is never wrapped and the atom's axis is 0.8 long on `anglemotor2`; the lifted front wheel's "lost spin" is a placement artefact (fx/wheelspin)
+
+**1. The lifted front wheel (task 1): the probe, not the physics.** Live (`tipab-wheelspin-alarm-lift__live__000`: ALARM held 30 substeps, released 3 m up, one wheel at a time set to 5 rad/s about its axle, idle drive) every wheel keeps its spin
+(5.0 -> 4.97 / 4.92 / 4.87 ... the world's drag), front or rear, and ours does the same (`examples/wheelspin`, 5.04, 4.96, 4.92). The loss of 12bf / 12bh (0.66 / 0.79 rad/s in the first substep) needs the placement to **skip the hold**: released at once from where the robot stands, the wheel
+resting on the floor still has its contacts of the step before. Live with no hold (`tipab-wheelspin-alarm-lift-hold0__live__000`, new `wspin` plan field of `ra2_tipab.js`) the spun front wheel drops 5 -> 1.93 / 0.36, a rear one 5 -> 2.4 / 0.4 (the other rear one keeps 5.0), and the wheels
+nobody spun are kicked by 0.2-2.8 rad/s; ours (`WS_HOLD=0`) loses 5 -> 0.79 / 0.66 on the front pair only and kicks nothing. So the same artefact in both, different in size because the contact manifolds a teleport leaves are not the same; it concerns no state a match reaches (the 12w placement holds). Nothing to fix.
+
+**2. The in-air wheel (task 2): two effects, both the servo's own.** Live, a Scout released 12 m up and driven 100/0 (`tipab-wheelspin-scout-air-drive__live__001`, the hinge atoms' rows in `-scout-air-hinge__live__001`; the tail drive of 12bd shows the same): one wheel holds 17.1 but is knocked **once a turn**
+(22 substeps: 37.63, 16.54, 4.67, 14.44, 16.58, 16.99 rad/s relative to the chassis), the other swings **13.7 .. 21.2 rad/s twice a turn** (period 11 substeps, a smooth sinusoid). Ours held 17.1 to 0.01. The atom rows (`HN`: flags, limits, target `+0x98` every call) show both:
+
+* **The target angle is never wrapped.** `0x535a50` stores `+0x98 = target + dt * speed` as it is; the error `target - angle` (the angle from `atan2`, in (-pi, pi]) is brought into range **once** (`err > pi: err -= 2 pi` and then `err < -pi: err += 2 pi`). A wheel's target therefore
+  climbs to 10.0 rad, where `target - angle` passes 3 pi and the one subtraction is no longer enough: the servo sees a miss of more than pi, its impulse hits the cap (675 N m, 25 rad/s a call) and the cap's slip pulls the target back by 5.9 rad (`10.0 -> 4.09`, live, every 22 calls). Ours wrapped the
+  target on every call (`wrap(self.target)`, 12l) and pulled it to within pi of the angle when the motor came on (`set_motor`); the live first call after the motor starts has the target 8.79 against an angle of 2.76 (the atom was built with 0 and never pulled in). Both removed (`RA2_SERVO_WRAP=1` restores them).
+  Ours then gives 37.5, 16.5, 5.0, 14.3, 16.3, 17.1 once a turn (the unit test `a_free_wheel_is_knocked_once_a_turn_by_its_unwrapped_target`: the ring-down's shape, 22 calls apart).
+* **The axis is 0.8 long on `Styles\anglemotor2`.** The atoms keep the axis as the `.gmf` stores it, `*SPIN_AXIS`, **not normalized** (`atom + 0x28 / 0x48`: `(0.8, 0, 0)` and `(0, 0, -0.8)` on ALARM's two `anglemotor2` wheels and the Scout's second wheel, `(-1, 0, 0)` / `(0, 1, 0)` on `anglemotor1`; every other motor `.gmf` has a unit
+  `*SPIN_AXIS`; this is the 0.8 of 12af). The angle is `atan2(a . (axis x b), a . b)` with that axis, so a 0.8 axis measures `atan2(0.8 sin t, cos t)`, off by up to 0.11 rad twice a turn, and the servo (`0.8 err / dt`) answers with +-3.8 rad/s twice a turn: ours with the length (`RotorHinge::axis_len`,
+  `JointInfo::axis_len`, `HingeDesc::axis_scale`, `RA2_HINGE_UNIT_AXIS=1` for the old unit axis) swings 13.7 .. 20.9, peaks 11 calls apart, live 13.70 .. 21.18 (`a_short_axis_swings_the_servo_twice_a_turn`).
+
+Ours and live now agree in kind on both wheels. What differs is the **phase**: live the two wheels are knocked at different calls (their targets are stale from earlier drives: 8.79 and 7.61 against angles 2.76 and 0.39) where ours knocks both together, because ours' hinge angle is zero at the build pose
+and the original's is not (its reference vectors, `+0x58 / +0x68`, are `normalize(axis x Y)` of each body's own frame, whose zero lies at 2.76 / 0.39 rad for the Scout's wheels). Not ported: it needs the original's body frames (the cube turns of 12be).
+
+**3. Re-measured (ensembles, 96 warmups, 120 s, `RA2_AI_TRACE=1 FIDTRACE_UP=1`, `live_ref.py --table`, `length_window_cmp.py`, `tail_runs_cmp.py`).** Before = 12bh's / 12bf's numbers (same master; the old servo is `RA2_SERVO_WRAP=1 RA2_HINGE_UNIT_AXIS=1`), after = this branch:
+
+| | live | before | after |
+|---|---|---|---|
+| Box Scout / ALARM counted hits | 6.6 +- 0.6 / 42.5 +- 4.2 | 7.4 +- 0.5 / 36.9 +- 2.4 | 7.4 +- 0.5 / 36.6 +- 2.4 |
+| Octagon Scout / ALARM | 4.3 +- 0.7 / 13.7 +- 3.2 | 4.3 +- 0.3 / 18.0 +- 1.7 | 4.2 +- 0.3 / 14.7 +- 1.4 |
+| Compressor Sentinel / Wide Load | 5.2 +- 1.0 / 98.2 +- 17.5 | 5.5 +- 0.4 / 83.5 +- 5.0 | 4.7 +- 0.5 / 76.1 +- 4.5 |
+| Razor / FlapJack | 6.0 +- 1.6 / 0.6 +- 0.2 | 6.3 +- 0.4 / 1.2 +- 0.1 | 7.1 +- 0.5 / 1.2 +- 0.1 |
+| match length Box / Octagon s | 91.9 / 52.0 | 75.3 / 52.0 | 76.5 / 44.5 |
+| fights under 60 s, Box | 14 % | 27 % | 31 % |
+| Scout on its tail, share of the fight: Box (live 4.4 %) | | 5.9 % | 6.4 % |
+| same, Octagon (live 2.0 %, 12bg) | | 4.4 % | 5.7 % |
+| Scout runs >= 8 s, Box (live 4 in 23 fights; ours predicts) | | | 5.8, P 0.32 |
+
+Every move is inside the ensemble's noise (1-2 se of bodies that differ by a hundredth of a kg m^2, 12bf); the Octagon ALARM (18.0 -> 14.7, live 13.7) and Wide Load (83.5 -> 76.1, live 98.2) go either way; the Box's early-ending fights (31 % under 60 s against live's 14 %) and the Scout's tail share are not moved: **the wheel servo is not what keeps the
+Scout on its tail** (the chassis gets a knock of at most 0.4 rad/s from one spike, 12bd's lean difference 0.068 against 0.047 under a 100/0 drive remains).
+
+**Tests.** The two new ones above; `a_free_wheel_servo_runs_at_its_target_velocity` now reads the 16 calls before the first knock (the 17.11 of live's `havok-step__live__018`, which has no more than 20 calls).
+**Tools.** `examples/wheelspin` (a held, spun or driven robot per call: `WS_HOLD`, `WS_AIR`), `ra2_tipab.js` / `capture_tipab.py` (`wspin` per trial, `HINGE=1` for the atoms' `HN` rows with their frames), `tools/oracle/wheelspin/` (grids, `spin_rows.py`).
+Captures (added to `local/oracle/original`, manifest-additions-2026-11-13-wheelspin.tsv): `tipab-wheelspin-{alarm-lift,alarm-lift-hold0,scout-air-drive,scout-air-hinge,alarm-air-hinge}`.
+
+**Open.** The original's hinge zero (the two wheels' knock phase); the other motors' atoms were not read (only the `anglemotor` pair, 0.8 from the `.gmf` of every motor type is the rule here); the servo's `+0x80` limit branch (`angle += 2 pi` with the wrapped error) is not ported
+for a limited hinge; the Box's early endings (the Scout's tail stand, 12bd-12bh) and the Octagon length stay.

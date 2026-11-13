@@ -1,0 +1,109 @@
+{
+ "name": "wheelspin-alarm-lift",
+ "trials": [
+  {
+   "label": "wheel body 1 spun 5 about its axle, 3 m up",
+   "axis": [
+    0,
+    1,
+    0
+   ],
+   "deg": 0,
+   "w": 0,
+   "dcentre": [
+    0,
+    3,
+    0
+   ],
+   "steps": 40,
+   "wspin": [
+    [
+     1,
+     [
+      5,
+      0,
+      0
+     ]
+    ]
+   ]
+  },
+  {
+   "label": "wheel body 2 spun 5 about its axle, 3 m up",
+   "axis": [
+    0,
+    1,
+    0
+   ],
+   "deg": 0,
+   "w": 0,
+   "dcentre": [
+    0,
+    3,
+    0
+   ],
+   "steps": 40,
+   "wspin": [
+    [
+     2,
+     [
+      5,
+      0,
+      0
+     ]
+    ]
+   ]
+  },
+  {
+   "label": "wheel body 3 spun 5 about its axle, 3 m up",
+   "axis": [
+    0,
+    1,
+    0
+   ],
+   "deg": 0,
+   "w": 0,
+   "dcentre": [
+    0,
+    3,
+    0
+   ],
+   "steps": 40,
+   "wspin": [
+    [
+     3,
+     [
+      5,
+      0,
+      0
+     ]
+    ]
+   ]
+  },
+  {
+   "label": "wheel body 4 spun 5 about its axle, 3 m up",
+   "axis": [
+    0,
+    1,
+    0
+   ],
+   "deg": 0,
+   "w": 0,
+   "dcentre": [
+    0,
+    3,
+    0
+   ],
+   "steps": 40,
+   "wspin": [
+    [
+     4,
+     [
+      5,
+      0,
+      0
+     ]
+    ]
+   ]
+  }
+ ]
+}

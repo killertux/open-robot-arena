@@ -1322,7 +1322,14 @@ impl Havok17Backend {
                 // (`firetiming-scout-alarm__live__000`): the Scout's fork locks
                 // at -1.18 rad with its target at -2.59, and 29 substeps later
                 // the cocking motor starts from that same -2.59.
-                if !j.motor && matches!(j.kind, Kind::Hinge { .. }) {
+                //
+                // That is the whole story of a hinge's target except for the
+                // servo's own slip: it is never brought back within π of the angle
+                // when the motor comes on (live, `tipab-wheelspin-scout-air-hinge`:
+                // a wheel's target 8.79 against an angle 2.76 on the first call,
+                // docs/29 section 12bi); `RA2_SERVO_WRAP=1` keeps the old pull.
+                if !j.motor && matches!(j.kind, Kind::Hinge { .. }) && joints::servo_wraps_target()
+                {
                     j.target = position + joints::wrap(j.target - position);
                 }
                 j.motor = true;
@@ -1761,6 +1768,11 @@ impl PhysicsBackend for Havok17Backend {
                 .suspension
                 .map(|s| s.normalize_or_zero())
                 .filter(|s| *s != Vec3::ZERO),
+            axis_scale: if desc.axis_scale > 0.0 {
+                desc.axis_scale
+            } else {
+                1.0
+            },
         });
         Ok((self.joints.len() - 1) as JointHandle)
     }
@@ -1795,6 +1807,7 @@ impl PhysicsBackend for Havok17Backend {
             saved_limits: None,
             steer_rest: None,
             suspension: None,
+            axis_scale: 1.0,
         });
         Ok((self.joints.len() - 1) as JointHandle)
     }
@@ -1847,6 +1860,7 @@ impl PhysicsBackend for Havok17Backend {
             saved_limits: None,
             steer_rest: None,
             suspension: None,
+            axis_scale: 1.0,
         });
         Ok((self.joints.len() - 1) as JointHandle)
     }

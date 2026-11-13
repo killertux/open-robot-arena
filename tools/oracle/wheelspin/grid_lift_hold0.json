@@ -1,0 +1,113 @@
+{
+ "name": "wheelspin-alarm-lift-hold0",
+ "trials": [
+  {
+   "label": "hold0 wheel body 2 spun 5, 3 m up",
+   "axis": [
+    0,
+    1,
+    0
+   ],
+   "deg": 0,
+   "w": 0,
+   "dcentre": [
+    0,
+    3,
+    0
+   ],
+   "hold": 0,
+   "steps": 240,
+   "wspin": [
+    [
+     2,
+     [
+      5,
+      0,
+      0
+     ]
+    ]
+   ]
+  },
+  {
+   "label": "hold0 wheel body 4 spun 5, 3 m up",
+   "axis": [
+    0,
+    1,
+    0
+   ],
+   "deg": 0,
+   "w": 0,
+   "dcentre": [
+    0,
+    3,
+    0
+   ],
+   "hold": 0,
+   "steps": 240,
+   "wspin": [
+    [
+     4,
+     [
+      5,
+      0,
+      0
+     ]
+    ]
+   ]
+  },
+  {
+   "label": "hold0 wheel body 1 spun 5, 3 m up",
+   "axis": [
+    0,
+    1,
+    0
+   ],
+   "deg": 0,
+   "w": 0,
+   "dcentre": [
+    0,
+    3,
+    0
+   ],
+   "hold": 0,
+   "steps": 240,
+   "wspin": [
+    [
+     1,
+     [
+      5,
+      0,
+      0
+     ]
+    ]
+   ]
+  },
+  {
+   "label": "hold0 wheel body 3 spun 5, 3 m up",
+   "axis": [
+    0,
+    1,
+    0
+   ],
+   "deg": 0,
+   "w": 0,
+   "dcentre": [
+    0,
+    3,
+    0
+   ],
+   "hold": 0,
+   "steps": 240,
+   "wspin": [
+    [
+     3,
+     [
+      5,
+      0,
+      0
+     ]
+    ]
+   ]
+  }
+ ]
+}

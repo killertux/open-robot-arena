@@ -1920,6 +1920,7 @@ impl Duel {
                     max_torque: cap,
                     friction_torque: hinge.friction,
                     suspension: None,
+                    axis_scale: 1.0,
                 };
                 match self.physics.create_hinge(&desc) {
                     Ok(handle) => {

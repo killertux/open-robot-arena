@@ -720,6 +720,9 @@ pub struct JointInfo {
     /// `limits` are metres of travel, `rate` is m/s and the torques are forces.
     pub slider: bool,
     pub use_kind: JointUse,
+    /// The length of the hinge axis the original's atom keeps (the motor `.gmf`'s `*SPIN_AXIS`, 0.8 on
+    /// `Styles\anglemotor2`; docs/29 section 12bi); 1 for a piston.
+    pub axis_len: f32,
     /// A burst motor's firing pair (speed, raw torque): [`MotorStats::fire`].
     pub fire: Option<[f32; 2]>,
     /// A wheel's own numbers (`None` for every other joint).
@@ -1463,6 +1466,11 @@ fn assemble(comps: &[Component]) -> (Vec<Part>, Vec<usize>, Vec<Mat4>) {
             slider: piston.is_some(),
             rod_inertia: piston.map(|p| p.rod_inertia).unwrap_or(0.0),
             use_kind,
+            axis_len: if piston.is_some() {
+                1.0
+            } else {
+                comps[parent].hinge.as_ref().map_or(1.0, |h| h.axis_len)
+            },
             fire: motor.and_then(|m| m.fire).filter(|_| piston.is_none()),
             wheel: if use_kind == JointUse::Wheel {
                 comps[root].wheel.as_ref().map(|w| {
