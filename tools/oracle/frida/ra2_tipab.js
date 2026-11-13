@@ -79,7 +79,12 @@ function dumpX(phase, bodies) {
   })]);
 }
 
+const R5 = x => Math.round(x * 1e5) / 1e5;
+let wheelRows = false;
 let plan = null, rest = null;
+// FM [FM,seq,this] a burst motor fires (0x446810, the Scout's fork); BF [BF,seq,this] a burst piston fires (0x448750).
+Interceptor.attach(ptr('0x446810'), { onEnter() { if (plan) push(['FM', ++seq, this.context.ecx.toString()]); } });
+Interceptor.attach(ptr('0x448750'), { onEnter() { if (plan) push(['BF', ++seq, this.context.ecx.toString()]); } });
 const restExtra = new Map();
 const fire = new NativeFunction(ptr('0x448650'), 'void', ['pointer'], 'thiscall');
 Interceptor.attach(ptr('0x52aa60'), { onEnter() {
@@ -192,6 +197,15 @@ Interceptor.attach(ptr('0x4856f0'), { onEnter() {
       for (let r = b; r.compare(e) < 0; r = r.add(0x50)) ws.push([r.add(4).readS32(), r.add(8).readU8()]);
       push(['G', ++seq, body.toString(), ws]);
     }
+    // W  [W,seq,chassis,[[id,thrust,touching,normal(3),point(3),axle(3)] ...]]  every MagicAction apply of a chassis while a
+    //    plan runs and `wheels` was asked for (docs/29 12bg: the wheel records of a fight from a placed state, as ra2_robotpair.js)
+    if (plan && wheelRows) {
+      const b = t.add(0x24).readPointer(), e = t.add(0x28).readPointer();
+      const ws = [];
+      for (let r = b; r.compare(e) < 0; r = r.add(0x50))
+        ws.push([r.readS32(), r.add(4).readS32(), r.add(8).readU8(), vec(r.add(0xc)).map(R5), vec(r.add(0x2c)).map(R5), vec(r.add(0x3c)).map(R5)]);
+      push(['W', seq, body.toString(), ws]);
+    }
   } catch (err) { push(['E', ++seq, String(err)]); }
 } });
 
@@ -211,6 +225,7 @@ rpc.exports = {
   learnAt(addr) { learn(ptr(addr)); return f(ptr(addr).add(0x190)); },
   peek(addr, len) { return floats(ptr(addr), len); },
   peekPtrs(addr, n) { const o = []; for (let i = 0; i < n; i++) o.push(ptr(addr).add(4 * i).readPointer().toString()); return o; },
+  wheels(on) { wheelRows = !!on; return true; },
   watch(list) { watch = list ? list.map(s => ptr(s)) : null; return true; },
   arm(p) {
     p.ptrs = p.bodies.map(s => ptr(s));

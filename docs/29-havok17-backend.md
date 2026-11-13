@@ -8573,3 +8573,78 @@ copies in `~/ra2-oracle-backup/oracle/original`, `manifest-additions-2026-11-06-
 **Open.** (a) The Scout's tail stand in fights (Octagon 6.3 % / Box 8.9 % against 0.8 / 0.4 %): arrival now agrees (the blows, the wheelie), persistence does not. Next: the live fights' wheel thrust (`W` rows) and the Scout's pose on the 22 tail runs against
 ours' step by step, a controlled tail stand with the AI's Engage ramp running (not neutered), the live wheel's swing and the throttle-100/0 lean of 5. (b) ALARM's hammer on the placed Scout (12 of 16 in kind). (c) The Sentinel's push (+0.4-0.75 m/s after 0.5 s, of which +0.19 is already in the
 replay's start). (d) The Wide Load's Mini wheels (0.26 %) and its rod's centre (5 mm on y). (e) The front wheels' lost spin after a lift (test above). (f) The Box ALARM count 36.9 against 46.6, the Razor FlapJack count 1.2 against 0.6.
+
+### 12bg. The tail runs: from the same placed state with both AIs running ours leaves its tail as live does, long ones end matches by the immobility rule in both, and the 12bd-12bf persistence gap was a 5-fight live reference counted over frozen minutes (fx/tailrun; measurements, a test and tools, no engine change)
+
+12bf left one open question: in the Scout v ALARM fights ours puts the Scout on its tail as often as live but keeps it there 10-25 s against 0.3-1.6 s (tail share Octagon 6.3 % against 0.8 %, Box
+8.9 % against 0.4 %), and none of the controlled tests reproduced it. This round put both AIs into the controlled test, logged the brains' own inputs live, and enlarged the live reference. **No engine
+change: the gap is not there once the live side is counted right.**
+
+**1. The brains' inputs, live (task 1).** `ai_log_install.py` (`capture_boxstart.py AILOG=1`, `capture_tailfight.py`) wraps `SuperAI.Input` and `SuperAI.Evaluate` in the original's Python before a match and the
+captures carry `[clock, player, 'I', control, index, value]` and `[clock, player, 'E', tactic, priority, IsUpsideDown]` (the log of a session keeps every fight, each from clock 0). In the 40 placed fights below (about 470 Evaluates of the Scout, 172 of
+them on the tail): the Scout thinks every 1.000 s (442 of 461, the rest 0.1 s after a tactic that stopped running); **every** Invert Evaluate (146) is followed by a `Flip` within 0.3 s and the next Invert
+by one a second later (`InvertHandler`: first call, then 8 yields); the Engage throttle climbs 1.4 a tick (`boost_throttle += 0.1 max_throttle`, 850 of 851 steps), `Think` sets throttle and turn to 0 first. These
+are ours' traces (w24 of the Octagon ensemble: 41.0, 42.2, 43.6; Flip at 6.33, 7.37, 8.38). `IsUpsideDown` against the chassis' `up.y < 0` (B rows just before the Evaluate): 153 of 172 agree and the 19 others are all
+at `|up.y| <= 0.065` within the 0.03-0.05 s between the brain's view and the row (the brain reads the world a frame before the physics step, 12af); there is no other threshold. The immobility rule agrees too: in the two
+live Box A-frames below the match ends 19.8 and 18.6 s after the pair stands up (ours: 20 s).
+
+**2. A neutered brain still ticks (new tool, the cause of a first false lead).** `capture_tailfight.py` stands the Scout on its tail (`dcentre` from its rest centre, pitch -90), puts ALARM 2.5 m from it at one of eight azimuths facing it, releases
+both and switches both AIs on (`Think` an empty function on the instance and the tactics put aside until then). 40 trials (hazards on): `tailfight-scout-alarm-octagon-wall__live__000..015` (14-trial grid, 16 files with two repeats) and
+`tailfight-scout-alarm-octagon-floor__live__000..023` (24 trials). ALARM's hammer rod is moving at 6.9 m/s along the line to the Scout **7 substeps after the release, before the capture's AI-on call (14-18 substeps)**:
+the weapon logic of the brains (`Poker.Tick`, `Flipper.Tick`: `Input("Fire")` when the other robot is in its SmartZone) is in `Tick`, which runs whatever `Think` does. Ours with its brains off until the capture's AI-on
+step missed that blow (tail share of the 24 floor fights 0.278 against live's 0.166, three of ours persisting for 5.6-9.7 s); with the brains stepping from the release (`tipprobe` `TIPPROBE_AI=1`,
+`TIPPROBE_AI_AT=0`, `tailfight_cmp.py` `AI_AT0=1`) the first 16 substeps agree (largest lean difference 0.008 on average against 0.013; test below) and **ours leaves the tail as live does**:
+
+| 12 s from the placed state, both AIs | trials | tail share live | ours | leaves the tail (>= 0.5 for 0.5 s): live | ours |
+|---|---|---|---|---|---|
+| (0,0) and (+2,-2) from the rest centre, 8 azimuths each | 16 | 0.194 | 0.161 | 0.6-4.6 s, all 16 | 0.7-2.8 s, all 16 |
+| (-5.55,-5.25) (the -x wall), 8 azimuths | 8 | 0.113 | 0.295 | 0.7-3.6 s, all 8 | 0.8-9.7 s, 3 stay >= 5 s |
+
+In the second set the placement is partly wrong (the Scout's wheels 0.1 m from the wall, ALARM put inside or behind it at azimuths 135 and 180, ejected on the first substeps); two of the three that stay are those.
+(The first grid, `...-wall__...`, put the Scout at the pit cover 1: the `dcentre` height comes from the rest pose on the main floor and the cover top is 0.25 m higher, so the chassis starts 0.1-0.17 m inside it and the
+original's overlap push-out throws it up at 3.6 m/s where ours gives 0.8 m/s: not used for statistics.) At the think instants of a Scout on its tail (|up.y| < 0.3) live chooses Invert in 36 of 65 (55 %), ours in 159 of 444 (36 %): ours
+holds the stand longer in the trials it holds (they are the ones with many thinks), which is the other face of the persistent cases below; the lean at the instant is negative in 58 % and 42 %.
+
+**3. Persistent stands exist live, in the same classes.** Of the 16 wall trials (the pit cover ones, see above), 8 end with the Scout still on its tail after 12 s; in `__001` and `__003` it is held between the wall (the wall body `1800` in the contact rows) and ALARM's chassis at 0.5-1.1 m height, while its brain chose Invert 5 and 7 times of 13 and pressed `Flip` as often without toppling it (`__007`, `__009`: 2 of 13). Ours'
+long runs fall in the same classes: of the 38 runs of 3 s or more in the 96-fight ensembles, 16 are an A-frame (both robots on their tails, their undersides together; ALARM's hammer swings through the
+air and the Scout's strokes find nothing), 15 a Scout with an upright ALARM close (13 at the wall: the hammer's blows of 40-150 hp move it 0.3 m/s in ours' w1, the wall takes them) and 7 with ALARM far (6 at the wall).
+
+**4. The live reference, enlarged and cut at the end of the match.** 15 new bell-primed Box fights (`boxstart-tailstat-scout-alarm-box__live__000..014`, `capture_parts_set.sh` with `AGENT=frida/ra2_robotpair.js NOSAMPLE=1 AILOG=1`, 125 s of sim each, the brains'
+log in the `.json`). Two of them (`__001`, `__008`) have both robots on their tails from 12.2 and 8.4 s to the end of the capture: **the match ended at 32.0 and 27.0 s, 19.8 and 18.6 s after the pair stood up (the 20 s immobility rule), and the robots stayed where
+they were for the remaining 90-100 s**, which the earlier counts (a share of the first 120 s of a capture) took for a live tail run of 110-120 s, or for nothing, depending on the fight. The old live references also carry the frozen minutes after the match (the Octagon's lasts
+52 s, the captures 120 s): their shares were diluted by 2.3 and the gap to ours inflated by as much. `tail_runs_cmp.py` cuts the fights with a brains' log at the match end (`match_end`) and tests ours' rate of long runs against the live count:
+
+| (runs >= 0.3 s with |up.y| < 0.3; per fight) | live | ours (96 fights) |
+|---|---|---|
+| Box, fights (mean length) | 20 (97 s, 15 cut at the match end) | 96 (75 s) |
+| Scout: runs / on the tail s / share of the fight | 0.35 / 2.16 / 2.2 % | 0.95 / 4.43 / 5.9 % |
+| Scout runs 0.3-1 / 1-3 / 3-8 / >= 8 s | 3 / 2 / 0 / 2 (max 19.8 s) | 46 / 20 / 7 / 18 (max 20.8 s) |
+| ALARM: runs / on the tail s | 0.80 / 3.47 | 0.97 / 3.47 |
+| **both on their tails, s per fight** | **1.92** | **1.96** |
+| Scout runs >= 3 s: live count, ours' rate x 20 fights, P(live or fewer) | 2, 5.2, 0.11 | |
+| Scout runs >= 8 s | 2, 3.8, 0.28 | |
+| Octagon, fights (mean length) | 25 (99 s; 8 cut at the match end, the other 17 not: no log) | 96 (52 s) |
+| Scout: runs / on the tail s / share of the fight | 0.76 / 1.95 / 2.0 % | 0.73 / 2.27 / 4.4 % |
+| Scout runs 0.3-1 / 1-3 / 3-8 / >= 8 s | 13 / 2 / 2 / 2 (max 17.7 s) | 50 / 7 / 5 / 8 (max 24.3 s) |
+| Scout runs >= 3 s: live 4, predicted 3.4, P(live or fewer) | 0.75 | |
+| runs >= 8 s: live 2, predicted 2.1 | 0.65 | |
+| both on their tails, s per fight | 0.80 | 0.63 |
+
+(Octagon: 8 new bell-primed fights `boxstart-tailstat-scout-alarm-octagon__live__000..007`, added to the 17 of 12bd.)
+
+Arrival agrees: the Scout starts 0.76 tail runs a fight in the Octagon live against 0.73 ours, the A-frame is as frequent in the Box (1.92 against 1.96 s a fight). The Scout's time on its tail is about 2 times ours' in the Box and in the share
+of the Octagon, **but the counts of its long runs agree in the Octagon (4 live against 3.4 predicted for 3 s or more, 2 against 2.1 for 8 s or more) and are not significantly different in the Box (P = 0.11 and 0.28 with 20 live fights)**; the earlier
+"0 of 22" was 5 Box and 17 Octagon fights. A factor of two in the rate of runs of 3 s or more would take on the order of a hundred live fights to prove.
+
+**What this changes.** 12bd-12bf's open question (a) is closed as not shown: the controlled tips, the landings, the resolver, the inertias, the fork and hammer strokes, the AI's inputs and the immobility rule agree, and the one measured in-fight
+difference is within the live reference's error. The tail stand is not a place to look for the 8 % of the Box Scout fights that end early on it: they end at 20 s in the live A-frames too.
+
+**Tools and tests.** `tools/oracle/capture_tailfight.py` (+ `sideways/grids/tailfight_wall.json`, `tailfight_floor.json`), `ai_log_install.py`, `capture_boxstart.py AILOG=1`, `frida/ra2_tipab.js` (`W` wheel records, `FM` / `BF` fork and piston fires, `wheels(true)`),
+`sideways/tailfight_cmp.py` (a capture's trials in ours with the same placed state and AI start), `tail_runs_cmp.py`, `tailfight_data.py` (the test's data), `examples/tipprobe` (`TIPPROBE_AI`, `TIPPROBE_AI_AT`, `TIPPROBE_ALARM_REL`; `A` lines for the other robot);
+`tests/tailfight_live.rs` (`the_scouts_lean_follows_the_originals_in_the_first_16_substeps_of_a_fight`: five placed states, differences 0.014-0.045; `alarms_hammer_is_on_its_way_when_the_brains_step_from_the_release`: the rod at 15.7 m/s against 1.0 without the brains).
+Captures (display `:9`, port `27149`, under the shared lock, `Teams/ AI/ ra2.cfg` copied before and sha256-compared after, "prefix restored (identical)" each time; manifest rows, copies in `~/ra2-oracle-backup/oracle/original`, `manifest-additions-2026-11-06-tailrun.tsv`):
+`tailfight-scout-alarm-octagon-wall__live__000..015`, `tailfight-scout-alarm-octagon-floor__live__000..023`, `boxstart-tailstat-scout-alarm-box__live__000..014`, `boxstart-tailstat-scout-alarm-octagon__live__000..007`.
+
+**Open.** (a) The Scout's tail time in the Box (about 2 times live's in the numbers, long-run counts not significant): about a hundred live fights would settle it. (b) The live left wheel in the air does not hold 17 rad/s: its speed about the chassis' x
+wobbles by 3.8 rad/s at about 4 Hz (a smooth sinusoid, `tipab-scout-tail-drive-box__live__000`; the right wheel holds 17.1; the principal axes of both are within 1 degree of the axle) where ours holds it to 0.1 (the chassis' angular velocity jitters by 0.1 rad/s in both); cause not found, not seen to matter. (c) Items (b)-(f) of 12bf
+(ALARM's hammer on the placed Scout, the Sentinel's push, the Wide Load's Mini wheels, the front wheels' lost spin after a lift, the Box ALARM count and the Razor FlapJack count) stand.
